@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://striking-bravery-production.up.railway.app/api';
 
 const PhotoUpload = ({ onPhotoUpload, onNext, onSkip }) => {
   const [uploadedImage, setUploadedImage] = useState(null);

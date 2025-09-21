@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardHeader, CardBody, CardTitle, CardDescription, Button, Badge, SkillBadge, ProgressBar } from './ui';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://striking-bravery-production.up.railway.app/api';
 
 const FuturisticResumeUpload = ({ sessionId, onResumeUpload, onBack, onNext }) => {
   const [resumeAnalysis, setResumeAnalysis] = useState(null);

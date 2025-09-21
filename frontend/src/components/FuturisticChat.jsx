@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Card, CardHeader, CardBody, CardTitle, Button, ChatBox, Badge, StatusBadge } from './ui';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://striking-bravery-production.up.railway.app/api';
 
 const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const [messages, setMessages] = useState([]);
