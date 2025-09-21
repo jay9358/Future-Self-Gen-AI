@@ -25,7 +25,7 @@ ChartJS.register(
   Legend
 );
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://striking-bravery-production.up.railway.app/api';
 
 const FutureSelfInterface = ({ 
   sessionId, 
