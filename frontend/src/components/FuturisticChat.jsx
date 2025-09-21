@@ -48,7 +48,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const initializeSocket = () => {
     try {
       import('socket.io-client').then(({ io }) => {
-        socketRef.current = io('http://localhost:5000', {
+        socketRef.current = io('https://striking-bravery-production.up.railway.app', {
           transports: ['websocket', 'polling'],
           reconnection: true,
           reconnectionAttempts: 5,
