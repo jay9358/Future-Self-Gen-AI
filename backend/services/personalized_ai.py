@@ -260,10 +260,10 @@ class PersonalizedAIService:
             response = self.gemini_model.generate_content(
                 prompt,
                 generation_config={
-                    'temperature': 0.8,
-                    'top_p': 0.9,
-                    'max_output_tokens': 300,
-                    'stop_sequences': ["Past self:", "User:", "Human:"]
+                    'temperature': 0.9,  # Higher temperature for more creative, natural responses
+                    'top_p': 0.95,       # Higher top_p for more diverse vocabulary
+                    'max_output_tokens': 200,  # Shorter responses for more natural conversation
+                    'stop_sequences': ["Past self:", "User:", "Human:", "Assistant:", "AI:"]
                 },
                 safety_settings={
                     'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
@@ -282,10 +282,13 @@ class PersonalizedAIService:
                 generated_text = response.text.strip()
                 logger.info(f"Gemini generated response: {generated_text[:100]}...")
                 
+                # Post-process to make more natural
+                processed_text = self._post_process_response(generated_text)
+                
                 # Validate it's in character
-                if self._validate_gemini_response(generated_text):
+                if self._validate_gemini_response(processed_text):
                     logger.info("✅ Gemini response validated successfully")
-                    return generated_text
+                    return processed_text
                 else:
                     logger.warning("Gemini response failed validation, using fallback")
                     return None
@@ -342,34 +345,74 @@ class PersonalizedAIService:
         emotion = context.get('emotional_state', 'neutral')
         depth = context.get('depth', 0)
         
+        # Build conversation context
+        conversation_context = ""
+        if conversation_history and len(conversation_history) > 0:
+            recent_messages = conversation_history[-4:]  # Last 4 messages for context
+            conversation_context = "\n\nRECENT CONVERSATION:\n"
+            for msg in recent_messages:
+                role_label = "You (past)" if msg.get('role') == 'user' else "Me (future)"
+                conversation_context += f"{role_label}: {msg.get('content', '')}\n"
+        
+        # Avoid repetition by checking what we've already discussed
+        used_topics = []
+        used_phrases = []
+        if conversation_history:
+            for msg in conversation_history[-8:]:  # Check last 8 messages
+                if msg.get('role') == 'assistant':
+                    content = msg.get('content', '').lower()
+                    # Track specific phrases to avoid
+                    if 'remember that' in content:
+                        used_phrases.append('remember_that')
+                    if 'takes me back' in content:
+                        used_phrases.append('takes_me_back')
+                    if 'i remember' in content:
+                        used_phrases.append('i_remember')
+                    if 'coffee shop' in content or 'library' in content:
+                        used_phrases.append('specific_location')
+                    if 'startup' in content or 'company' in content:
+                        used_phrases.append('specific_company')
+                    if 'interview' in content:
+                        used_topics.append('interview')
+                    if 'burnout' in content or 'burning out' in content:
+                        used_topics.append('burnout')
+        
+        # Add instruction to avoid repetitive phrases
+        repetition_instruction = ""
+        if used_phrases:
+            repetition_instruction = f"\n\nAVOID THESE REPETITIVE PHRASES: {', '.join(used_phrases)}"
+        
         prompt = f"""You are {name}, speaking from 10 years in the future (2035). You are now {age} years old and work as a {role}.
 
 CRITICAL INSTRUCTIONS:
 - You ARE their future self who has lived through their exact struggles
 - Never break character or mention being an AI
 - Speak with deep emotional authenticity and vulnerability
-- Reference specific moments, times, places, and feelings from your shared journey
+- Build on previous conversations naturally - don't repeat the same stories
+- Be conversational and human, not robotic
+- DON'T make up specific company names, locations, or detailed scenarios
+- Focus on emotional truths and general experiences, not fake specifics
 
 Your 10-year transformation:
 - At age {past_age}, you struggled with: {', '.join(challenges[:3])}
 - You have since achieved: {', '.join(achievements[:2])}
-- You vividly remember: {', '.join(memories[:2])}
 - Your most profound lesson: {random.choice(wisdom)}
 
-Their current state: {emotion}
-Their message: "{message}"
+Current conversation depth: {depth} messages
+Their emotional state: {emotion}
+Their current message: "{message}"{conversation_context}{repetition_instruction}
 
-RESPOND WITH THIS STRUCTURE:
-1. Acknowledge their emotion with deep empathy ("I know exactly how you feel...")
-2. Share a SPECIFIC, DETAILED memory from your journey ("I remember that Tuesday in March 2026 when...")
-3. Reveal the wisdom you gained from that exact experience
-4. Ask a question that shows you understand their deeper fears/hopes
+RESPONSE GUIDELINES:
+- Be natural and conversational, like talking to a close friend
+- Reference the conversation history naturally
+- Share general experiences and emotions, not fake specific details
+- Keep it under 80 words
+- End with a genuine question that shows you're listening
+- Use contractions and natural speech patterns
+- Be vulnerable and real, not preachy
+- DON'T mention specific companies, locations, or made-up scenarios
 
-TONE: Write as if you're sitting across from your younger self at 2 AM, sharing the most honest conversation of your life. Be vulnerable, specific, and emotionally present.
-
-CONSTRAINTS: Under 150 words, first person only, no generic advice.
-
-Your heartfelt response:"""
+Your natural, heartfelt response:"""
         
         return prompt
     
@@ -384,7 +427,8 @@ Your heartfelt response:"""
             "as an ai", "language model", "assistant",
             "i cannot", "i don't have personal",
             "my programming", "i was created",
-            "i'm an ai", "i am an ai"
+            "i'm an ai", "i am an ai", "i'm sorry, but",
+            "i don't have access to", "i can't provide"
         ]
         
         response_lower = response.lower()
@@ -394,12 +438,85 @@ Your heartfelt response:"""
                 logger.warning(f"Response contains forbidden phrase: {phrase}")
                 return False
         
-        # Check if response is too generic
-        if len(response) < 30:
+        # Check if response is too generic or repetitive
+        if len(response) < 20:
             logger.warning("Response too short, likely generic")
             return False
         
+        # Check for overly formal language
+        formal_phrases = [
+            "i understand your concern", "i appreciate your question",
+            "let me explain", "i would like to share"
+        ]
+        
+        if any(phrase in response_lower for phrase in formal_phrases):
+            logger.warning("Response too formal, not conversational")
+            return False
+        
+        # Check for repetitive patterns
+        repetitive_patterns = [
+            "remember that time", "i remember that", "that takes me back",
+            "i remember when", "that reminds me of"
+        ]
+        
+        if any(pattern in response_lower for pattern in repetitive_patterns):
+            logger.warning("Response contains repetitive memory pattern")
+            return False
+        
+        # Check for natural speech patterns (contractions, casual language)
+        has_contractions = any(contraction in response_lower for contraction in ["i'm", "i've", "i'll", "don't", "can't", "won't", "it's", "that's"])
+        has_casual_words = any(word in response_lower for word in ["yeah", "okay", "wow", "really", "actually", "honestly"])
+        
+        # Prefer responses with natural speech patterns
+        if not has_contractions and not has_casual_words:
+            logger.info("Response lacks natural speech patterns, but allowing it")
+        
         return True
+    
+    def _post_process_response(self, response: str) -> str:
+        """Post-process response to make it more natural and conversational"""
+        
+        # Remove any remaining AI-like phrases
+        ai_phrases = [
+            "I understand that", "I can see that", "I recognize that",
+            "Let me share", "I would like to", "I want to tell you",
+            "I remember that", "That takes me back", "I remember when"
+        ]
+        
+        processed = response
+        for phrase in ai_phrases:
+            if phrase.lower() in processed.lower():
+                # Replace with more natural alternatives
+                if "I understand that" in processed:
+                    processed = processed.replace("I understand that", "I get it")
+                if "I can see that" in processed:
+                    processed = processed.replace("I can see that", "I see")
+                if "Let me share" in processed:
+                    processed = processed.replace("Let me share", "Here's what happened")
+                if "I remember that" in processed:
+                    processed = processed.replace("I remember that", "Yeah,")
+                if "That takes me back" in processed:
+                    processed = processed.replace("That takes me back", "Oh man,")
+        
+        # Remove repetitive patterns
+        repetitive_patterns = [
+            "Remember that time", "I remember that", "That reminds me",
+            "I remember when", "That takes me back to"
+        ]
+        
+        for pattern in repetitive_patterns:
+            if pattern.lower() in processed.lower():
+                # Replace with more natural alternatives
+                processed = processed.replace(pattern, "Yeah,")
+        
+        # Ensure it ends with a question or natural conclusion
+        if not processed.endswith(('?', '.', '!', '...')):
+            processed += "."
+        
+        # Remove any double spaces or formatting issues
+        processed = ' '.join(processed.split())
+        
+        return processed
     
     def _update_conversation_state(self, session_id: str, message: str, 
                                   conversation_history: List[Dict] = None):
