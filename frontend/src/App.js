@@ -7,7 +7,7 @@ import FuturisticDashboard from './components/FuturisticDashboard';
 import axios from 'axios';
 import './App.css';
 
-const API_URL = 'https://striking-bravery-production.up.railway.app/api';
+const API_URL = 'http://localhost:5000/api';
 
 
 function App() {

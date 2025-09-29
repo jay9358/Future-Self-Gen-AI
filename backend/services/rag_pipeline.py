@@ -22,9 +22,9 @@ class RAGPipeline:
         """Load career-specific knowledge base"""
         try:
             # Load career database as knowledge base
-            from models.career_database import CAREER_DATABASE
+            from model.career_database import career_database      
             
-            for career, info in CAREER_DATABASE.items():
+            for career, info in career_database.get_all_careers().items():
                 self.knowledge_base[career] = {
                     'title': info.get('title', career),
                     'skills': info.get('required_skills', []),

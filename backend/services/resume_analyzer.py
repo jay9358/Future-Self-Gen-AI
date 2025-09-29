@@ -61,16 +61,49 @@ class ResumeAnalyzer:
         try:
             import google.generativeai as genai
             
-            api_key = os.getenv('GEMINI_API_KEY')
+            # Try both possible environment variable names
+            api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY')
             if api_key:
                 genai.configure(api_key=api_key)
-                self.gemini_model = genai.GenerativeModel('gemini-pro')
-                logger.info("✅ Gemini AI initialized successfully")
+                
+                # List available models first
+                try:
+                    models = genai.list_models()
+                    available_models = [model.name for model in models if 'generateContent' in model.supported_generation_methods]
+                    logger.info(f"Available models: {available_models}")
+                    
+                    # Try to find a working model
+                    model_names_to_try = ['gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-pro']
+                    
+                    for model_name in model_names_to_try:
+                        try:
+                            self.gemini_model = genai.GenerativeModel(model_name)
+                            logger.info(f"✅ {model_name} initialized successfully")
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to initialize {model_name}: {e}")
+                            continue
+                    
+                    if not self.gemini_model:
+                        logger.error("No working Gemini model found")
+                        
+                except Exception as e:
+                    logger.error(f"Error listing models: {e}")
+                    # Fallback to gemini-pro
+                    try:
+                        self.gemini_model = genai.GenerativeModel('gemini-pro')
+                        logger.info("✅ Gemini Pro initialized successfully (fallback)")
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback also failed: {fallback_error}")
+                        self.gemini_model = None
             else:
-                logger.warning("Gemini API key not found - using pattern matching only")
+                self.gemini_model = None
+                logger.warning("Gemini API key not found (GOOGLE_API_KEY or GEMINI_API_KEY) - using pattern matching only")
         except ImportError:
+            self.gemini_model = None
             logger.warning("google-generativeai not installed - using pattern matching only")
         except Exception as e:
+            self.gemini_model = None
             logger.error(f"Gemini initialization error: {e}")
 
     def extract_text_from_file(self, file_path: str) -> str:
@@ -113,65 +146,214 @@ class ResumeAnalyzer:
             return ""
 
     def analyze_resume(self, resume_text: str, career_goal: str = None) -> Dict[str, Any]:
-        """Main analysis function - comprehensive resume analysis"""
+        """Main analysis function - comprehensive resume analysis using Gemini AI only"""
         if not resume_text:
             return self._empty_analysis()
         
-        # Start with pattern-based extraction (reliable baseline)
-        logger.info("Starting pattern-based resume analysis...")
-        analysis = self._extract_all_information(resume_text)
-        
-        # Detect career path
-        analysis['detected_career'] = self._detect_career_path(analysis['skills'], resume_text)
-        
-        # Calculate career match
-        if career_goal:
-            analysis['career_match'] = self._calculate_career_match(
-                analysis['skills'], 
-                career_goal if career_goal else analysis['detected_career'],
-                analysis['years_experience']
-            )
-        else:
-            analysis['career_match'] = self._calculate_career_match(
-                analysis['skills'],
-                analysis['detected_career'],
-                analysis['years_experience']
-            )
-        
-        # Generate career insights
-        analysis['career_insights'] = self._generate_career_insights(
-            analysis['skills'],
-            analysis['years_experience'],
-            analysis['education_level'],
-            analysis['detected_career']
-        )
-        
-        # Enhance with Gemini if available
+        # Use Gemini for all data extraction
         if self.gemini_model:
             try:
-                logger.info("Enhancing with Gemini AI analysis...")
-                gemini_insights = self._enhance_with_gemini(resume_text, analysis)
-                if gemini_insights:
-                    analysis['gemini_insights'] = gemini_insights
-                    analysis['analysis_method'] = 'Pattern Matching + Gemini AI'
-                else:
-                    analysis['analysis_method'] = 'Pattern Matching'
+                logger.info("Starting Gemini-only resume analysis...")
+                analysis = self._extract_all_information_with_gemini(resume_text, career_goal)
+                analysis['analysis_method'] = 'Gemini AI Only'
+                logger.info("✅ Resume analysis completed using Gemini AI only")
+                return analysis
             except Exception as e:
-                logger.warning(f"Gemini enhancement failed: {e}")
-                analysis['analysis_method'] = 'Pattern Matching'
+                logger.error(f"Gemini analysis failed: {e}")
+                return self._empty_analysis()
         else:
-            analysis['analysis_method'] = 'Pattern Matching'
-        
-        # Create extracted_info for backward compatibility
-        analysis['extracted_info'] = {
-            'skills': self._flatten_skills(analysis['skills']),
-            'years_experience': analysis['years_experience'],
-            'education_level': analysis['education_level'],
-            'personal_info': analysis['personal_info']
+            logger.error("Gemini model not available - cannot perform analysis")
+            return self._empty_analysis()
+
+    def _extract_all_information_with_gemini(self, resume_text: str, career_goal: str = None) -> Dict[str, Any]:
+        """Extract all information from resume using Gemini AI only"""
+        try:
+            # Create comprehensive prompt for Gemini to extract all resume data
+            prompt = f"""You are an expert resume parser and career analyst. Extract ALL information from this resume and provide a comprehensive JSON response.
+
+RESUME TEXT:
+{resume_text}
+
+CAREER GOAL (if provided): {career_goal or "Not specified"}
+
+Please extract and analyze the following information and return a JSON response with this EXACT structure:
+
+{{
+  "personal_info": {{
+    "name": "Full name",
+    "email": "email@example.com",
+    "phone": "phone number",
+    "linkedin": "LinkedIn profile",
+    "github": "GitHub profile",
+    "location": "City, State/Country"
+  }},
+  "skills": {{
+    "technical": ["technical skills"],
+    "soft": ["soft skills"],
+    "languages": ["programming languages"],
+    "frameworks": ["frameworks and libraries"],
+    "databases": ["database technologies"],
+    "cloud": ["cloud platforms and services"],
+    "tools": ["development tools and software"],
+    "methodologies": ["development methodologies like Agile, Scrum"]
+  }},
+  "experience": [
+    {{
+      "title": "Job Title",
+      "company": "Company Name",
+      "duration": "Start Date - End Date",
+      "years": "number of years"
+    }}
+  ],
+  "education": [
+    {{
+      "degree": "Degree Type",
+      "field": "Field of Study",
+      "institution": "University/Institution Name",
+      "year": "Graduation Year"
+    }}
+  ],
+  "years_experience": "total years of professional experience as number",
+  "education_level": "education level as number (0-5: 0=high school, 1=certificate, 2=associate, 3=bachelor, 4=master, 5=phd)",
+  "certifications": ["list of certifications"],
+  "projects": [
+    {{
+      "name": "Project Name",
+      "description": "Project Description"
+    }}
+  ],
+  "detected_career": "most suitable career path (software_engineer, frontend_developer, backend_developer, fullstack_developer, data_scientist, data_analyst, data_engineer, machine_learning_engineer, devops_engineer, cloud_architect, mobile_developer, ui_ux_designer, product_manager, project_manager, qa_engineer, security_engineer)",
+  "career_match": {{
+    "match_percentage": "percentage as number",
+    "career_readiness": "Learning Phase/Entry-Level/Mid-Level/Senior-Ready",
+    "matched_skills": ["skills that match the career"],
+    "missing_skills": ["skills needed for the career"],
+    "recommendations": ["recommendations for career development"],
+    "next_steps": ["next steps to take"],
+    "timeline_to_goal": "estimated timeline",
+    "confidence_score": "confidence score as number"
+  }},
+  "career_insights": {{
+    "strengths": ["key strengths"],
+    "areas_for_improvement": ["areas to improve"],
+    "skill_level": "Beginner/Developing/Intermediate/Advanced/Expert",
+    "market_demand": "Emerging/Moderate/High/Very High",
+    "recommended_next_role": "recommended next job title",
+    "total_skills_count": "total number of skills as number",
+    "career_readiness": "Foundation Building/Entry-Level Ready/Mid-Level Ready/Senior-Ready"
+  }},
+  "extracted_info": {{
+    "skills": ["flattened list of all skills"],
+    "years_experience": "total years as number",
+    "education_level": "education level as number",
+    "personal_info": {{
+      "name": "Full name"
+    }}
+  }}
+}}
+
+IMPORTANT INSTRUCTIONS:
+1. Extract ALL information accurately from the resume text
+2. For years_experience, calculate the total professional experience
+3. For education_level, use the scale 0-5 as specified
+4. For detected_career, choose the most appropriate career from the list provided
+5. For career_match, calculate how well the person matches their career goal (or detected career if no goal provided)
+6. For career_insights, provide comprehensive analysis of strengths, weaknesses, and recommendations
+7. Ensure all arrays contain actual extracted data, not empty arrays
+8. Be thorough and accurate in your extraction
+9. If information is not found, use appropriate defaults (empty strings for text, 0 for numbers, empty arrays for lists)
+10. Make sure the JSON is valid and complete
+
+Return ONLY the JSON response, no additional text."""
+
+            response = self.gemini_model.generate_content(prompt)
+            
+            if response and response.text:
+                try:
+                    # Parse the JSON response
+                    text = response.text.strip()
+                    
+                    # Clean up the response to extract JSON
+                    json_start = text.find('{')
+                    json_end = text.rfind('}') + 1
+                    
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = text[json_start:json_end]
+                        analysis = json.loads(json_str)
+                        
+                        # Validate and clean the analysis
+                        analysis = self._validate_and_clean_gemini_analysis(analysis)
+                        
+                        logger.info("✅ Gemini AI extraction completed successfully")
+                        return analysis
+                    else:
+                        logger.error("No valid JSON found in Gemini response")
+                        return self._empty_analysis()
+                        
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON parsing failed: {e}")
+                    logger.error(f"Raw response: {response.text}")
+                    return self._empty_analysis()
+            else:
+                logger.error("No response from Gemini")
+                return self._empty_analysis()
+                
+        except Exception as e:
+            logger.error(f"Gemini extraction error: {e}")
+            return self._empty_analysis()
+
+    def _validate_and_clean_gemini_analysis(self, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and clean the Gemini analysis to ensure proper structure"""
+        # Ensure all required fields exist with proper defaults
+        cleaned_analysis = {
+            'personal_info': analysis.get('personal_info', {}),
+            'skills': analysis.get('skills', {}),
+            'experience': analysis.get('experience', []),
+            'education': analysis.get('education', []),
+            'years_experience': analysis.get('years_experience', 0),
+            'education_level': analysis.get('education_level', 0),
+            'certifications': analysis.get('certifications', []),
+            'projects': analysis.get('projects', []),
+            'detected_career': analysis.get('detected_career', 'software_engineer'),
+            'career_match': analysis.get('career_match', {}),
+            'career_insights': analysis.get('career_insights', {}),
+            'extracted_info': analysis.get('extracted_info', {})
         }
         
-        logger.info(f"✅ Resume analysis completed using {analysis['analysis_method']}")
-        return analysis
+        # Ensure skills structure is complete
+        if not isinstance(cleaned_analysis['skills'], dict):
+            cleaned_analysis['skills'] = {}
+        
+        required_skill_categories = ['technical', 'soft', 'languages', 'frameworks', 'databases', 'cloud', 'tools', 'methodologies']
+        for category in required_skill_categories:
+            if category not in cleaned_analysis['skills']:
+                cleaned_analysis['skills'][category] = []
+        
+        # Ensure personal_info structure
+        if not isinstance(cleaned_analysis['personal_info'], dict):
+            cleaned_analysis['personal_info'] = {}
+        
+        # Ensure career_match structure
+        if not isinstance(cleaned_analysis['career_match'], dict):
+            cleaned_analysis['career_match'] = {}
+        
+        # Ensure career_insights structure
+        if not isinstance(cleaned_analysis['career_insights'], dict):
+            cleaned_analysis['career_insights'] = {}
+        
+        # Ensure extracted_info structure
+        if not isinstance(cleaned_analysis['extracted_info'], dict):
+            cleaned_analysis['extracted_info'] = {}
+        
+        # Create extracted_info for backward compatibility
+        cleaned_analysis['extracted_info'] = {
+            'skills': self._flatten_skills(cleaned_analysis['skills']),
+            'years_experience': cleaned_analysis['years_experience'],
+            'education_level': cleaned_analysis['education_level'],
+            'personal_info': cleaned_analysis['personal_info']
+        }
+        
+        return cleaned_analysis
 
     def _extract_all_information(self, resume_text: str) -> Dict[str, Any]:
         """Extract all information from resume"""
@@ -729,14 +911,16 @@ class ResumeAnalyzer:
             if framework_lower in ['react native', 'flutter', 'ionic', 'xamarin']:
                 career_scores['mobile_developer'] += 4
         
-        # Score based on tools
+        # Score based on tools (reduced weights to prevent over-scoring)
         for tool in skills.get('tools', []):
             tool_lower = tool.lower()
             
-            # DevOps tools
+            # DevOps tools (reduced weight - these are often used by developers too)
             if tool_lower in ['docker', 'kubernetes', 'jenkins', 'terraform', 'ansible']:
-                career_scores['devops_engineer'] += 4
-                career_scores['cloud_architect'] += 2
+                career_scores['devops_engineer'] += 2  # Reduced from 4
+                career_scores['cloud_architect'] += 1  # Reduced from 2
+                career_scores['software_engineer'] += 1  # Developers use these too
+                career_scores['backend_developer'] += 1
                 
             # Design tools
             if tool_lower in ['figma', 'sketch', 'adobe xd', 'photoshop', 'illustrator']:
@@ -746,11 +930,18 @@ class ResumeAnalyzer:
             if tool_lower in ['selenium', 'cypress', 'jest', 'postman']:
                 career_scores['qa_engineer'] += 3
                 
-        # Score based on cloud services
+            # Development tools (give points to software engineers)
+            if tool_lower in ['git', 'github', 'gitlab', 'jira', 'confluence', 'vscode', 'intellij']:
+                career_scores['software_engineer'] += 2
+                career_scores['frontend_developer'] += 1
+                career_scores['backend_developer'] += 1
+                
+        # Score based on cloud services (reduced weight)
         for cloud in skills.get('cloud', []):
-            career_scores['cloud_architect'] += 3
-            career_scores['devops_engineer'] += 3
-            career_scores['software_engineer'] += 1
+            career_scores['cloud_architect'] += 2  # Reduced from 3
+            career_scores['devops_engineer'] += 1  # Reduced from 3
+            career_scores['software_engineer'] += 1  # Developers use cloud too
+            career_scores['backend_developer'] += 1
         
         # Score based on databases
         database_count = len(skills.get('databases', []))
@@ -758,37 +949,78 @@ class ResumeAnalyzer:
             career_scores['data_engineer'] += 3
             career_scores['backend_developer'] += 2
         
-        # Score based on job titles in experience
+        # Score based on job titles in experience (increased weight)
         experience = self._extract_experience(resume_text)
         for exp in experience:
             title_lower = exp.get('title', '').lower()
             
             for career, keywords in {
-                'software_engineer': ['software engineer', 'software developer'],
-                'frontend_developer': ['frontend', 'front-end', 'ui developer'],
-                'backend_developer': ['backend', 'back-end', 'server'],
-                'fullstack_developer': ['fullstack', 'full-stack', 'full stack'],
-                'data_scientist': ['data scientist', 'ml engineer'],
-                'data_analyst': ['data analyst', 'business analyst'],
-                'devops_engineer': ['devops', 'site reliability', 'sre'],
-                'cloud_architect': ['cloud architect', 'solutions architect'],
-                'mobile_developer': ['mobile', 'ios', 'android'],
-                'ui_ux_designer': ['ui', 'ux', 'designer'],
-                'product_manager': ['product manager', 'product owner'],
-                'project_manager': ['project manager', 'program manager'],
-                'qa_engineer': ['qa', 'quality', 'test'],
-                'security_engineer': ['security', 'cybersecurity', 'infosec']
+                'software_engineer': ['software engineer', 'software developer', 'developer', 'programmer', 'engineer'],
+                'frontend_developer': ['frontend', 'front-end', 'ui developer', 'frontend developer', 'react developer', 'angular developer'],
+                'backend_developer': ['backend', 'back-end', 'server', 'backend developer', 'api developer', 'server developer'],
+                'fullstack_developer': ['fullstack', 'full-stack', 'full stack', 'fullstack developer', 'full stack developer'],
+                'data_scientist': ['data scientist', 'ml engineer', 'machine learning engineer', 'ai engineer'],
+                'data_analyst': ['data analyst', 'business analyst', 'analyst'],
+                'data_engineer': ['data engineer', 'etl developer', 'data pipeline'],
+                'devops_engineer': ['devops', 'site reliability', 'sre', 'devops engineer', 'platform engineer'],
+                'cloud_architect': ['cloud architect', 'solutions architect', 'cloud engineer'],
+                'mobile_developer': ['mobile', 'ios', 'android', 'mobile developer', 'ios developer', 'android developer'],
+                'ui_ux_designer': ['ui', 'ux', 'designer', 'ui designer', 'ux designer', 'product designer'],
+                'product_manager': ['product manager', 'product owner', 'product lead'],
+                'project_manager': ['project manager', 'program manager', 'scrum master'],
+                'qa_engineer': ['qa', 'quality', 'test', 'qa engineer', 'test engineer', 'quality assurance'],
+                'security_engineer': ['security', 'cybersecurity', 'infosec', 'security engineer', 'cyber security']
             }.items():
                 if any(keyword in title_lower for keyword in keywords):
-                    career_scores[career] += 10  # Heavy weight for actual job titles
+                    career_scores[career] += 15  # Increased weight for actual job titles
+                    
+        # Additional context analysis from resume text
+        resume_lower = resume_text.lower()
         
-        # Get the highest scoring career
+        # Look for specific career indicators in the text
+        career_indicators = {
+            'software_engineer': ['software development', 'application development', 'system development', 'coding', 'programming'],
+            'frontend_developer': ['user interface', 'user experience', 'web design', 'responsive design', 'frontend development'],
+            'backend_developer': ['api development', 'server-side', 'database design', 'backend development', 'microservices'],
+            'data_scientist': ['machine learning', 'artificial intelligence', 'predictive modeling', 'statistical analysis', 'data science'],
+            'data_analyst': ['business intelligence', 'reporting', 'data visualization', 'analytics', 'kpi'],
+            'devops_engineer': ['ci/cd', 'continuous integration', 'continuous deployment', 'infrastructure', 'automation'],
+            'mobile_developer': ['mobile app', 'ios app', 'android app', 'mobile development', 'app store'],
+            'ui_ux_designer': ['wireframing', 'prototyping', 'user research', 'design system', 'interaction design']
+        }
+        
+        for career, indicators in career_indicators.items():
+            for indicator in indicators:
+                if indicator in resume_lower:
+                    career_scores[career] += 3  # Moderate weight for context indicators
+        
+        # Get the highest scoring career with better logic
         if career_scores:
-            best_career = max(career_scores, key=career_scores.get)
-            if career_scores[best_career] > 0:
+            # Sort careers by score
+            sorted_careers = sorted(career_scores.items(), key=lambda x: x[1], reverse=True)
+            best_career, best_score = sorted_careers[0]
+            
+            # Only return the best career if it has a reasonable score
+            if best_score >= 5:  # Minimum threshold
+                # Check if there's a close second place
+                if len(sorted_careers) > 1:
+                    second_career, second_score = sorted_careers[1]
+                    # If scores are very close, prefer more general roles
+                    if best_score - second_score <= 3:
+                        # Prefer software_engineer over very specific roles if scores are close
+                        if best_career in ['devops_engineer', 'cloud_architect', 'qa_engineer'] and second_career == 'software_engineer':
+                            return 'software_engineer'
+                        elif best_career in ['frontend_developer', 'backend_developer'] and second_career == 'fullstack_developer':
+                            return 'fullstack_developer'
+                
+                # Log top 3 career scores for debugging
+                top_3 = sorted_careers[:3]
+                logger.info(f"Career detection scores: {top_3}")
+                logger.info(f"Selected career: {best_career} (score: {best_score})")
                 return best_career
         
         # Default fallback
+        logger.info("Career detection: Using default software_engineer")
         return 'software_engineer'
 
     def _calculate_career_match(self, skills: Dict[str, List[str]], career_goal: str, years_exp: int) -> Dict[str, Any]:
@@ -1072,46 +1304,177 @@ class ResumeAnalyzer:
         else:
             return "Foundation Building"
 
-    def _enhance_with_gemini(self, resume_text: str, initial_analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Enhance analysis with Gemini AI insights"""
+    def _get_gemini_enhanced_data(self, resume_text: str, initial_analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Get enhanced skills and career detection from Gemini"""
         if not self.gemini_model:
             return None
         
         try:
-            # Prepare data for Gemini
-            skills_summary = {
-                'languages': initial_analysis['skills'].get('languages', [])[:5],
-                'frameworks': initial_analysis['skills'].get('frameworks', [])[:5],
-                'tools': initial_analysis['skills'].get('tools', [])[:5]
-            }
-            
-            prompt = f"""As a career advisor, analyze this resume and provide insights:
+            prompt = f"""You are an expert resume parser. Extract and enhance the following information from this resume:
 
-RESUME EXCERPT:
-{resume_text[:2000]}
+RESUME TEXT:
+{resume_text[:2500]}
 
-EXTRACTED DATA:
+CURRENT EXTRACTED DATA:
+- Skills: {initial_analysis['skills']}
 - Detected Career: {initial_analysis['detected_career']}
 - Years Experience: {initial_analysis['years_experience']}
-- Top Skills: {skills_summary}
-- Education Level: {initial_analysis['education_level']}
 
-Provide a JSON response with:
+Please provide a JSON response with enhanced data:
 {{
-  "career_confirmation": "confirmed career path or suggested alternative",
-  "hidden_strengths": ["strength not obvious from keywords"],
-  "career_trajectory": "where this person will be in 5 years",
-  "unique_value_proposition": "what makes this candidate special",
-  "strategic_recommendations": ["specific actionable advice"],
-  "market_positioning": "how to position in job market"
-}}"""
+  "enhanced_skills": {{
+    "languages": ["programming languages found"],
+    "frameworks": ["frameworks and libraries"],
+    "tools": ["development tools and software"],
+    "databases": ["database technologies"],
+    "cloud": ["cloud platforms and services"],
+    "soft_skills": ["soft skills and competencies"],
+    "certifications": ["professional certifications"],
+    "methodologies": ["development methodologies like Agile, Scrum"]
+  }},
+  "enhanced_career": {{
+    "primary_career": "most accurate career path",
+    "career_level": "entry/mid/senior/lead/executive",
+    "specialization": "specific specialization within the field",
+    "industry": "target industry"
+  }},
+  "enhanced_experience": {{
+    "years_experience": "more accurate years of experience",
+    "experience_quality": "assessment of experience depth",
+    "leadership_experience": "any leadership or management experience",
+    "key_achievements": ["notable achievements and accomplishments"]
+  }},
+  "education_enhancement": {{
+    "education_level": "more accurate education level",
+    "relevant_degrees": ["relevant degrees and qualifications"],
+    "institutions": ["educational institutions"]
+  }}
+}}
+
+Focus on accuracy and completeness. Extract skills that might have been missed by pattern matching."""
+
+            response = self.gemini_model.generate_content(prompt)
+            
+            if response and response.text:
+                try:
+                    text = response.text.strip()
+                    json_start = text.find('{')
+                    json_end = text.rfind('}') + 1
+                    
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = text[json_start:json_end]
+                        enhanced_data = json.loads(json_str)
+                        
+                        # Merge enhanced skills with existing skills
+                        if 'enhanced_skills' in enhanced_data:
+                            for category, skills in enhanced_data['enhanced_skills'].items():
+                                if skills and isinstance(skills, list):
+                                    # Add new skills to existing categories
+                                    if category in initial_analysis['skills']:
+                                        initial_analysis['skills'][category].extend(skills)
+                                        initial_analysis['skills'][category] = list(set(initial_analysis['skills'][category]))
+                                    else:
+                                        initial_analysis['skills'][category] = skills
+                        
+                        # Override career detection if Gemini provides a more specific one
+                        if 'enhanced_career' in enhanced_data and enhanced_data['enhanced_career'].get('primary_career'):
+                            gemini_career = enhanced_data['enhanced_career']['primary_career'].lower().replace(' ', '_')
+                            if gemini_career in ['software_engineer', 'frontend_developer', 'backend_developer', 'fullstack_developer', 
+                                               'data_scientist', 'data_analyst', 'devops_engineer', 'mobile_developer', 
+                                               'ui_ux_designer', 'product_manager', 'qa_engineer']:
+                                initial_analysis['detected_career'] = gemini_career
+                                logger.info(f"✅ Gemini overrode career detection: {gemini_career}")
+                        
+                        logger.info("✅ Gemini enhanced data extraction completed")
+                        return enhanced_data
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Gemini enhanced data JSON parsing failed: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Gemini enhanced data extraction error: {e}")
+            
+        return None
+
+    def _enhance_with_gemini(self, resume_text: str, initial_analysis: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Enhance analysis with comprehensive Gemini AI insights"""
+        if not self.gemini_model:
+            return None
+        
+        try:
+            # Prepare comprehensive data for Gemini
+            skills_summary = {
+                'languages': initial_analysis['skills'].get('languages', [])[:10],
+                'frameworks': initial_analysis['skills'].get('frameworks', [])[:10],
+                'tools': initial_analysis['skills'].get('tools', [])[:10],
+                'databases': initial_analysis['skills'].get('databases', [])[:5],
+                'cloud': initial_analysis['skills'].get('cloud', [])[:5],
+                'soft_skills': initial_analysis['skills'].get('soft_skills', [])[:10]
+            }
+            
+            # Create a more comprehensive prompt for better analysis
+            prompt = f"""You are an expert career advisor and resume analyst. Analyze this resume comprehensively and provide detailed insights.
+
+RESUME TEXT:
+{resume_text[:3000]}
+
+CURRENT ANALYSIS:
+- Detected Career: {initial_analysis['detected_career']}
+- Years Experience: {initial_analysis['years_experience']}
+- Education Level: {initial_analysis['education_level']}
+- Skills Found: {skills_summary}
+- Personal Info: {initial_analysis.get('personal_info', {})}
+
+Please provide a comprehensive JSON analysis with the following structure:
+{{
+  "career_assessment": {{
+    "primary_career": "most suitable career path",
+    "alternative_careers": ["alternative career options"],
+    "career_level": "entry/mid/senior/executive",
+    "confidence_score": 85
+  }},
+  "skills_analysis": {{
+    "technical_strengths": ["strong technical skills"],
+    "missing_skills": ["skills to develop"],
+    "skill_gaps": ["areas for improvement"],
+    "unique_skills": ["rare or valuable skills"]
+  }},
+  "experience_evaluation": {{
+    "experience_quality": "assessment of experience depth",
+    "career_progression": "how career has progressed",
+    "leadership_indicators": ["leadership experience found"],
+    "achievement_highlights": ["notable achievements"]
+  }},
+  "market_positioning": {{
+    "target_roles": ["specific job titles to target"],
+    "salary_expectation": "estimated salary range",
+    "market_demand": "how in-demand these skills are",
+    "competitive_advantages": ["what makes them competitive"]
+  }},
+  "development_recommendations": {{
+    "immediate_actions": ["what to do in next 3 months"],
+    "skill_development": ["skills to learn/improve"],
+    "certification_suggestions": ["relevant certifications"],
+    "career_advancement": ["how to advance career"]
+  }},
+  "resume_improvements": {{
+    "strengths": ["what's working well"],
+    "weaknesses": ["areas to improve"],
+    "suggestions": ["specific improvement suggestions"],
+    "keyword_optimization": ["keywords to add"]
+  }}
+}}
+
+Provide detailed, actionable insights based on the resume content. Be specific and practical in your recommendations."""
 
             response = self.gemini_model.generate_content(prompt)
             
             if response and response.text:
                 try:
                     # Try to parse JSON from response
-                    text = response.text
+                    text = response.text.strip()
+                    
+                    # Look for JSON content more robustly
                     json_start = text.find('{')
                     json_end = text.rfind('}') + 1
                     
@@ -1119,22 +1482,53 @@ Provide a JSON response with:
                         json_str = text[json_start:json_end]
                         insights = json.loads(json_str)
                         
-                        logger.info("✅ Gemini insights generated successfully")
-                        return insights
+                        # Validate the insights structure
+                        if self._validate_gemini_insights(insights):
+                            logger.info("✅ Comprehensive Gemini insights generated successfully")
+                            return insights
+                        else:
+                            logger.warning("Gemini insights structure validation failed")
+                            return self._create_fallback_insights(response.text)
                     else:
-                        # Return raw insights if JSON parsing fails
-                        return {
-                            'raw_insights': response.text,
-                            'analysis_note': 'Gemini provided unstructured insights'
-                        }
-                except json.JSONDecodeError:
-                    return {
-                        'raw_insights': response.text,
-                        'analysis_note': 'Gemini insights in text format'
-                    }
+                        return self._create_fallback_insights(response.text)
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"JSON parsing failed: {e}")
+                    return self._create_fallback_insights(response.text)
+                    
         except Exception as e:
             logger.error(f"Gemini enhancement error: {e}")
             return None
+
+    def _validate_gemini_insights(self, insights: Dict[str, Any]) -> bool:
+        """Validate that Gemini insights have the expected structure"""
+        required_sections = [
+            'career_assessment', 'skills_analysis', 'experience_evaluation',
+            'market_positioning', 'development_recommendations', 'resume_improvements'
+        ]
+        
+        for section in required_sections:
+            if section not in insights:
+                return False
+        return True
+
+    def _create_fallback_insights(self, raw_text: str) -> Dict[str, Any]:
+        """Create structured insights from raw Gemini response"""
+        return {
+            'raw_analysis': raw_text,
+            'career_assessment': {
+                'primary_career': 'Analysis in progress',
+                'confidence_score': 70
+            },
+            'skills_analysis': {
+                'technical_strengths': ['See raw analysis for details'],
+                'missing_skills': ['See raw analysis for details']
+            },
+            'development_recommendations': {
+                'immediate_actions': ['Review raw analysis for specific recommendations']
+            },
+            'analysis_note': 'Gemini provided detailed analysis in text format'
+        }
 
     def _flatten_skills(self, skills: Dict[str, List[str]]) -> List[str]:
         """Flatten skills dictionary into a single list"""

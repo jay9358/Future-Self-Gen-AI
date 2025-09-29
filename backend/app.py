@@ -1,53 +1,39 @@
-# app.py - Corrected Future Self AI Career Advisor Backend
+# app_structured.py - Future Self AI Career Advisor Backend
 import os
 import sys
 import json
-import base64
 import uuid
-import hashlib
-import tempfile
-import re
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-
-# Flask and extensions
-from flask import Flask, request, jsonify, send_from_directory, Response
+import logging
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
-
-# Document processing
-import PyPDF2
-import docx
-
-# Image processing
-from PIL import Image
-import numpy as np
-
-# AI and ML
-import anthropic
-import google.generativeai as genai
-import openai
-
-# Data processing
-import pandas as pd
-
-# Additional utilities
-import redis
-import jwt
-from dotenv import load_dotenv
-import logging
-from dataclasses import dataclass, asdict
-import threading
-import queue
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, Optional
 
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
 
-# Configure logging
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import services
+from services.session_service import SessionService
+from services.personalized_ai import personalized_ai_service
+from services.rag_pipeline import rag_pipeline
+from model.career_database import career_database
+from services.resume_analyzer import (
+    ResumeAnalyzer, 
+    extract_text_from_pdf, 
+    extract_text_from_docx,
+    calculate_career_match
+)
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -55,816 +41,754 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, static_folder='../frontend/build', static_url_path='')
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max file size
+app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
-# CORS configuration - Fixed
+# Setup CORS
 CORS(app, resources={
-    r"/api/*": {
-        "origins": ["http://localhost:3000", "http://localhost:5000", "http://localhost:5173", "http://127.0.0.1:5000"],
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
         "supports_credentials": True
     }
 })
 
-# Initialize SocketIO
+# Initialize SocketIO with CORS support
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
-    async_mode='threading',
     logger=True,
-    engineio_logger=True
+    engineio_logger=False,
+    async_mode='threading',
+    ping_timeout=60,
+    ping_interval=25,
+    allow_upgrades=True
 )
 
-# Rate limiting
+# Setup rate limiting
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["200 per day", "50 per hour"]
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
 )
 
-# Redis for session management
-try:
-    redis_client = redis.Redis(
-        host=os.getenv('REDIS_HOST', 'localhost'),
-        port=int(os.getenv('REDIS_PORT', 6379)),
-        db=0,
-        decode_responses=True
-    )
-    redis_client.ping()
-    logger.info("Redis connected successfully")
-except:
-    redis_client = None
-    logger.warning("Redis not available, using in-memory storage")
+# Initialize services
+session_service = SessionService()
+resume_analyzer = ResumeAnalyzer()
 
-# AI Model Configuration - Fixed
-class AIModels:
-    def __init__(self):
-        # Claude
-        try:
-            self.claude = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-            logger.info("Claude API initialized")
-        except:
-            self.claude = None
-            logger.warning("Claude API not configured")
-        
-        # Gemini - Fixed model name
-        try:
-            genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
-            # Use the correct model name
-            self.gemini = genai.GenerativeModel('gemini-1.5-flash')
-            logger.info("Gemini API initialized")
-        except Exception as e:
-            self.gemini = None
-            logger.warning(f"Gemini API not configured: {e}")
-        
-        # OpenAI
-        try:
-            openai.api_key = os.getenv('OPENAI_API_KEY')
-            self.openai_client = openai
-            logger.info("OpenAI API initialized")
-        except:
-            self.openai_client = None
-            logger.warning("OpenAI API not configured")
+# File upload configuration
+UPLOAD_FOLDER = Path('uploads')
+ALLOWED_EXTENSIONS = {'pdf', 'docx', 'doc', 'txt'}
+UPLOAD_FOLDER.mkdir(exist_ok=True)
 
-ai_models = AIModels()
+# Store active connections
+active_connections = {}
 
-# Directory setup
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / 'uploads'
-STATIC_DIR = BASE_DIR / 'static'
-AVATAR_DIR = STATIC_DIR / 'avatars'
-RESUME_DIR = STATIC_DIR / 'resumes'
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Create directories
-for directory in [UPLOAD_DIR, STATIC_DIR, AVATAR_DIR, RESUME_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
+def generate_session_id():
+    """Generate unique session ID"""
+    return str(uuid.uuid4())
 
-# File extensions
-ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-ALLOWED_DOCUMENT_EXTENSIONS = {'pdf', 'docx', 'txt'}
-
-# Career Database
-CAREER_DATABASE = {
-    "doctor": {
-        "title": "Medical Doctor",
-        "avg_salary": {"entry": 60000, "mid": 180000, "senior": 350000},
-        "years_training": 11,
-        "required_skills": [
-            "Biology", "Chemistry", "Anatomy", "Physiology", "Pharmacology",
-            "Clinical Skills", "Patient Care", "Medical Ethics", "Research",
-            "Critical Thinking", "Communication", "Empathy"
-        ],
-        "personality_traits": ["Compassionate", "Detail-oriented", "Resilient"],
-        "work_life_balance": 3,
-        "job_satisfaction": 8,
-        "growth_potential": 9
-    },
-    "software_engineer": {
-        "title": "Software Engineer",
-        "avg_salary": {"entry": 75000, "mid": 130000, "senior": 200000},
-        "years_training": 1,
-        "required_skills": [
-            "Programming", "Data Structures", "Algorithms", "System Design",
-            "Git", "Testing", "Debugging", "Agile", "Cloud Computing",
-            "Problem Solving", "Continuous Learning"
-        ],
-        "personality_traits": ["Logical", "Creative", "Patient", "Curious"],
-        "work_life_balance": 7,
-        "job_satisfaction": 8,
-        "growth_potential": 10
-    },
-    "data_scientist": {
-        "title": "Data Scientist",
-        "avg_salary": {"entry": 85000, "mid": 130000, "senior": 180000},
-        "years_training": 2,
-        "required_skills": [
-            "Python", "R", "SQL", "Statistics", "Machine Learning",
-            "Data Visualization", "Big Data", "Deep Learning",
-            "Communication", "Problem Solving"
-        ],
-        "personality_traits": ["Analytical", "Curious", "Detail-oriented"],
-        "work_life_balance": 7,
-        "job_satisfaction": 8,
-        "growth_potential": 9
-    },
-    "entrepreneur": {
-        "title": "Entrepreneur",
-        "avg_salary": {"entry": -50000, "mid": 100000, "senior": 1000000},
-        "years_training": 0,
-        "required_skills": [
-            "Business Strategy", "Marketing", "Sales", "Finance", "Leadership",
-            "Networking", "Product Development", "Risk Management",
-            "Resilience", "Vision", "Adaptability"
-        ],
-        "personality_traits": ["Risk-taker", "Visionary", "Persistent"],
-        "work_life_balance": 3,
-        "job_satisfaction": 9,
-        "growth_potential": 10
-    },
-    "teacher": {
-        "title": "Teacher",
-        "avg_salary": {"entry": 40000, "mid": 55000, "senior": 75000},
-        "years_training": 4,
-        "required_skills": [
-            "Subject Expertise", "Curriculum Development", "Classroom Management",
-            "Communication", "Assessment", "Technology Integration",
-            "Patience", "Creativity", "Empathy"
-        ],
-        "personality_traits": ["Patient", "Nurturing", "Creative"],
-        "work_life_balance": 8,
-        "job_satisfaction": 8,
-        "growth_potential": 5
-    }
-}
-
-# Session storage
-sessions_store = {}
-
-# Utility Functions
-def allowed_file(filename, extensions):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in extensions
-
-def extract_text_from_pdf(filepath):
-    try:
-        with open(filepath, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-        return text
-    except Exception as e:
-        logger.error(f"PDF extraction error: {e}")
-        return ""
-
-def extract_text_from_docx(filepath):
-    try:
-        doc = docx.Document(filepath)
-        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-        return text
-    except Exception as e:
-        logger.error(f"DOCX extraction error: {e}")
-        return ""
-
-def analyze_resume_with_ai(resume_text):
-    """Analyze resume using AI"""
-    if ai_models.gemini:
-        try:
-            prompt = f"""
-            Analyze this resume and extract:
-            1. Current role/title
-            2. Years of experience
-            3. Key skills (technical and soft)
-            4. Education level
-            
-            Resume: {resume_text[:3000]}
-            
-            Return as structured text.
-            """
-            
-            response = ai_models.gemini.generate_content(prompt)
-            return {"analysis": response.text}
-        except Exception as e:
-            logger.error(f"AI analysis error: {e}")
-    
-    return {"analysis": "Manual analysis required"}
-
-def calculate_career_match(user_skills, career):
-    """Calculate match percentage between user skills and career requirements"""
-    career_info = CAREER_DATABASE.get(career, {})
-    required_skills = career_info.get('required_skills', [])
-    
-    if not required_skills:
-        return {"match_percentage": 0, "matched_skills": [], "missing_skills": []}
-    
-    user_skills_lower = [s.lower() for s in user_skills]
-    required_skills_lower = [s.lower() for s in required_skills]
-    
-    matched = [s for s in required_skills if s.lower() in user_skills_lower]
-    missing = [s for s in required_skills if s.lower() not in user_skills_lower]
-    
-    match_percentage = (len(matched) / len(required_skills)) * 100
-    
-    return {
-        "match_percentage": round(match_percentage, 2),
-        "matched_skills": matched,
-        "missing_skills": missing
-    }
-
-def generate_aged_avatar(photo_path, age_years=10):
-    """Simple age progression (placeholder for real implementation)"""
-    # In production, use a real age progression API or model
-    # For now, just return the original photo
-    return photo_path
-
-def generate_future_self_response(career, question, context):
-    """Generate response as future self using AI"""
-    career_info = CAREER_DATABASE.get(career, {})
-    
-    prompt = f"""
-    You are speaking as someone's future self who became a successful {career_info.get('title', career)}.
-    You are 10 years in the future. Be realistic about both challenges and rewards.
-    
-    Career: {career}
-    Personality: {', '.join(career_info.get('personality_traits', []))}
-    
-    User question: {question}
-    
-    Respond in first person, as if you are their actual future self. Be encouraging but honest.
-    Keep response under 200 words.
-    """
-    
-    if ai_models.claude:
-        try:
-            response = ai_models.claude.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.content[0].text
-        except Exception as e:
-            logger.error(f"Claude response error: {e}")
-    
-    if ai_models.gemini:
-        try:
-            response = ai_models.gemini.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            logger.error(f"Gemini response error: {e}")
-    
-    # Fallback response
-    return f"As a {career} 10 years from now, I can tell you the journey has been challenging but rewarding. Keep learning and stay persistent!"
-
-# API Routes
-
-@app.route('/api/health')
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "services": {
-            "redis": redis_client is not None,
-            "claude": ai_models.claude is not None,
-            "gemini": ai_models.gemini is not None,
-            "openai": ai_models.openai_client is not None
-        }
-    })
-
-@app.route('/api/upload', methods=['POST'])
-@limiter.limit("10 per hour")
-def upload_photo():
-    """Handle photo upload"""
-    try:
-        if 'photo' not in request.files:
-            return jsonify({"error": "No photo provided"}), 400
-        
-        file = request.files['photo']
-        if not allowed_file(file.filename, ALLOWED_IMAGE_EXTENSIONS):
-            return jsonify({"error": "Invalid file type"}), 400
-        
-        filename = f"{uuid.uuid4().hex}_{secure_filename(file.filename)}"
-        filepath = UPLOAD_DIR / filename
-        file.save(str(filepath))
-        
-        session_id = str(uuid.uuid4())
-        sessions_store[session_id] = {
-            "created_at": datetime.now().isoformat(),
-            "photo_path": str(filepath),
-            "conversations": []
-        }
-        
-        if redis_client:
-            redis_client.setex(
-                f"session:{session_id}",
-                86400,
-                json.dumps(sessions_store[session_id])
-            )
-        
-        return jsonify({
-            "success": True,
-            "session_id": session_id,
-            "photo_url": f"/static/uploads/{filename}"
-        })
-        
-    except Exception as e:
-        logger.error(f"Upload error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/age-photo', methods=['POST'])
-def age_photo():
-    """Generate aged version of uploaded photo - Fixed: removed async"""
-    try:
-        data = request.json
-        session_id = data.get('session_id')
-        career = data.get('career')
-        original_photo_url = data.get('original_photo_url')
-        
-        if not all([session_id, career, original_photo_url]):
-            return jsonify({"error": "Missing parameters"}), 400
-        
-        # Simple implementation - return original for now
-        # In production, integrate with age progression API
-        aged_url = original_photo_url
-        
-        if session_id in sessions_store:
-            sessions_store[session_id]['aged_avatar'] = aged_url
-        
-        return jsonify({
-            "success": True,
-            "aged_photo_url": aged_url
-        })
-        
-    except Exception as e:
-        logger.error(f"Age photo error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/start-conversation', methods=['POST'])
-def start_conversation():
-    """Start conversation with future self"""
-    try:
-        data = request.json
-        session_id = data.get('session_id')
-        career = data.get('career')
-        name = data.get('name', 'Friend')
-        
-        if not session_id or session_id not in sessions_store:
-            return jsonify({"error": "Invalid session"}), 400
-        
-        conversation_id = str(uuid.uuid4())
-        career_info = CAREER_DATABASE.get(career, {})
-        
-        greeting = generate_future_self_response(
-            career,
-            "Introduce yourself to your past self",
-            {"name": name, "career_info": career_info}
-        )
-        
-        conversation = {
-            "id": conversation_id,
-            "career": career,
-            "started_at": datetime.now().isoformat(),
-            "messages": [
-                {"role": "future_self", "content": greeting, "timestamp": datetime.now().isoformat()}
-            ]
-        }
-        
-        sessions_store[session_id]["conversations"].append(conversation)
-        
-        return jsonify({
-            "success": True,
-            "conversation_id": conversation_id,
-            "greeting": greeting
-        })
-        
-    except Exception as e:
-        logger.error(f"Start conversation error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/upload-resume', methods=['POST'])
-def upload_resume():
-    """Handle resume upload"""
-    try:
-        if 'resume' not in request.files:
-            return jsonify({"error": "No resume provided"}), 400
-        
-        file = request.files['resume']
-        session_id = request.form.get('session_id')
-        
-        if not session_id:
-            session_id = str(uuid.uuid4())
-            sessions_store[session_id] = {"created_at": datetime.now().isoformat()}
-        
-        if file and allowed_file(file.filename, ALLOWED_DOCUMENT_EXTENSIONS):
-            filename = f"{session_id}_resume_{secure_filename(file.filename)}"
-            filepath = RESUME_DIR / filename
-            file.save(str(filepath))
-            
-            # Extract text
-            file_ext = filename.rsplit('.', 1)[1].lower()
-            if file_ext == 'pdf':
-                resume_text = extract_text_from_pdf(filepath)
-            elif file_ext == 'docx':
-                resume_text = extract_text_from_docx(filepath)
-            else:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    resume_text = f.read()
-            
-            # Analyze resume
-            analysis = analyze_resume_with_ai(resume_text)
-            
-            # Simple skills extraction
-            skills = []
-            skill_keywords = ["python", "java", "javascript", "react", "node", "sql", "machine learning",
-                             "data analysis", "project management", "leadership", "communication"]
-            
-            resume_lower = resume_text.lower()
-            for skill in skill_keywords:
-                if skill in resume_lower:
-                    skills.append(skill.title())
-            
-            # Calculate career matches
-            career_matches = {}
-            for career_key in CAREER_DATABASE.keys():
-                match_result = calculate_career_match(skills, career_key)
-                career_matches[career_key] = match_result
-            
-            return jsonify({
-                "success": True,
-                "session_id": session_id,
-                "extracted_info": {
-                    "skills": skills,
-                    "years_experience": 2,  # Placeholder
-                    "education_level": 3    # Placeholder
-                },
-                "career_matches": career_matches,
-                "ai_analysis": analysis
-            })
-            
-    except Exception as e:
-        logger.error(f"Resume upload error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/skills-analysis', methods=['POST'])
-def skills_analysis():
-    """Analyze skills gap for career transition"""
-    try:
-        data = request.json
-        session_id = data.get('session_id')
-        target_career = data.get('career')
-        current_skills = data.get('current_skills', [])
-        
-        match_result = calculate_career_match(current_skills, target_career)
-        career_info = CAREER_DATABASE.get(target_career, {})
-        
-        learning_path = {
-            "immediate": match_result['missing_skills'][:3],
-            "short_term": match_result['missing_skills'][3:7],
-            "long_term": match_result['missing_skills'][7:]
-        }
-        
-        return jsonify({
-            "success": True,
-            "match_result": match_result,
-            "learning_path": learning_path,
-            "career_info": career_info
-        })
-        
-    except Exception as e:
-        logger.error(f"Skills analysis error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/generate-timeline', methods=['POST'])
-def generate_timeline():
-    """Generate career timeline projection"""
-    try:
-        data = request.json
-        career = data.get('career')
-        
-        career_info = CAREER_DATABASE.get(career, {})
-        timeline = {}
-        salary_range = career_info.get('avg_salary', {})
-        
-        for year in range(1, 11):
-            if year <= 2:
-                phase = "Entry Level"
-                salary = salary_range.get('entry', 50000)
-            elif year <= 5:
-                phase = "Mid Level"
-                salary = salary_range.get('mid', 75000)
-            else:
-                phase = "Senior Level"
-                salary = salary_range.get('senior', 100000)
-            
-            timeline[f"year_{year}"] = {
-                "title": f"{phase} {career_info.get('title', career)}",
-                "salary": f"${salary:,}/year",
-                "key_achievement": f"Major milestone in year {year}",
-                "challenge": f"Key challenge to overcome",
-                "life_event": f"Personal growth milestone"
-            }
-        
-        return jsonify({
-            "success": True,
-            "timeline": timeline
-        })
-        
-    except Exception as e:
-        logger.error(f"Timeline generation error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/generate-projects', methods=['POST'])
-def generate_projects():
-    """Generate project recommendations - Added missing endpoint"""
-    try:
-        data = request.json
-        career = data.get('career')
-        skill_level = data.get('skill_level', 'intermediate')
-        
-        projects = {
-            "software_engineer": [
-                {
-                    "title": "Personal Portfolio Website",
-                    "description": "Build a responsive portfolio using modern web technologies",
-                    "skills": ["HTML", "CSS", "JavaScript", "React"],
-                    "duration": "2-3 weeks"
-                },
-                {
-                    "title": "Task Management App",
-                    "description": "Create a full-stack application for managing tasks",
-                    "skills": ["Node.js", "Express", "MongoDB", "React"],
-                    "duration": "4 weeks"
-                }
-            ],
-            "data_scientist": [
-                {
-                    "title": "Predictive Model Project",
-                    "description": "Build a machine learning model for predictions",
-                    "skills": ["Python", "Scikit-learn", "Pandas", "Visualization"],
-                    "duration": "3 weeks"
-                }
-            ]
-        }
-        
-        recommended_projects = projects.get(career, [
-            {
-                "title": "Industry Research Project",
-                "description": "Research and document industry trends",
-                "skills": ["Research", "Analysis", "Presentation"],
-                "duration": "2 weeks"
-            }
-        ])
-        
-        return jsonify({
-            "success": True,
-            "projects": recommended_projects
-        })
-        
-    except Exception as e:
-        logger.error(f"Generate projects error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/interview-prep', methods=['POST'])
-def interview_prep():
-    """Generate interview preparation materials - Added missing endpoint"""
-    try:
-        data = request.json
-        career = data.get('career')
-        
-        interview_questions = {
-            "software_engineer": {
-                "technical": [
-                    "Explain the difference between stack and queue",
-                    "What is time complexity?",
-                    "How would you design a URL shortener?"
-                ],
-                "behavioral": [
-                    "Tell me about a challenging project",
-                    "How do you handle disagreements?",
-                    "Why this career?"
-                ]
-            }
-        }
-        
-        questions = interview_questions.get(career, {
-            "technical": ["Describe your technical skills"],
-            "behavioral": ["Why are you interested in this field?"]
-        })
-        
-        tips = [
-            "Research the company thoroughly",
-            "Practice your responses",
-            "Prepare questions to ask",
-            "Dress professionally",
-            "Arrive early"
-        ]
-        
-        return jsonify({
-            "success": True,
-            "questions": questions,
-            "tips": tips
-        })
-        
-    except Exception as e:
-        logger.error(f"Interview prep error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/salary-projection', methods=['POST'])
-def salary_projection():
-    """Project salary growth - Added missing endpoint"""
-    try:
-        data = request.json
-        career = data.get('career')
-        
-        career_info = CAREER_DATABASE.get(career, {})
-        salary_range = career_info.get('avg_salary', {})
-        
-        projections = []
-        base_salary = salary_range.get('entry', 50000)
-        
-        for year in range(1, 11):
-            if year <= 3:
-                growth_rate = 0.08
-            elif year <= 7:
-                growth_rate = 0.06
-            else:
-                growth_rate = 0.04
-            
-            base_salary *= (1 + growth_rate)
-            projections.append({
-                "year": year,
-                "salary": round(base_salary)
-            })
-        
-        return jsonify({
-            "success": True,
-            "starting_salary": salary_range.get('entry', 50000),
-            "projections": projections,
-            "negotiation_tips": [
-                "Research market rates",
-                "Highlight your unique value",
-                "Consider total compensation",
-                "Be prepared to negotiate"
-            ]
-        })
-        
-    except Exception as e:
-        logger.error(f"Salary projection error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/export-session', methods=['POST'])
-def export_session():
-    """Export session data"""
-    try:
-        session_id = request.json.get('session_id')
-        
-        if session_id not in sessions_store:
-            return jsonify({"error": "Invalid session"}), 400
-        
-        session = sessions_store[session_id]
-        
-        return jsonify({
-            "success": True,
-            "session_data": session,
-            "export_url": f"/reports/{session_id}.pdf"
-        })
-        
-    except Exception as e:
-        logger.error(f"Export error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# Socket.IO Events
+# WebSocket event handlers
 @socketio.on('connect')
 def handle_connect():
-    logger.info(f"Client connected: {request.sid}")
-    emit('connected', {"message": "Connected to Future Self server"})
+    """Handle client connection"""
+    client_id = request.sid
+    logger.info(f"Client connected: {client_id}")
+    active_connections[client_id] = {
+        'connected_at': datetime.now().isoformat(),
+        'session_id': None
+    }
+    emit('connected', {
+        'status': 'connected',
+        'client_id': client_id,
+        'message': 'Connected to Future Self AI'
+    })
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    logger.info(f"Client disconnected: {request.sid}")
+    """Handle client disconnection"""
+    client_id = request.sid
+    logger.info(f"Client disconnected: {client_id}")
+    if client_id in active_connections:
+        del active_connections[client_id]
 
 @socketio.on('join_session')
 def handle_join_session(data):
+    """Join a chat session room"""
+    client_id = request.sid
     session_id = data.get('session_id')
-    if session_id:
-        join_room(session_id)
-        emit('joined_session', {"session_id": session_id}, room=session_id)
+    
+    logger.info(f"Join session request from {client_id} for session {session_id}")
+    
+    if not session_id:
+        logger.error("No session ID provided")
+        emit('error', {'error': 'Session ID required', 'message': 'Session ID required'})
+        return
+    
+    # Create session if it doesn't exist
+    session_data = session_service.get_session(session_id)
+    if not session_data:
+        logger.info(f"Creating new session for {session_id}")
+        session_data = {
+            'session_id': session_id,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat(),
+            'status': 'active',
+            'conversation_history': [],
+            'persona': {}
+        }
+        session_service.create_session(session_data)
+    
+    # Join the room
+    join_room(session_id)
+    
+    # Update connection info
+    if client_id in active_connections:
+        active_connections[client_id]['session_id'] = session_id
+    
+    logger.info(f"Client {client_id} joined session {session_id} successfully")
+    
+    emit('session_joined', {
+        'session_id': session_id,
+        'status': 'joined',
+        'message': 'Joined chat session successfully'
+    })
 
-@socketio.on('send_message')
-def handle_message(data):
-    try:
-        session_id = data.get('session_id')
-        message = data.get('message')
-        career = data.get('career')
+@socketio.on('leave_session')
+def handle_leave_session(data):
+    """Leave a chat session room"""
+    client_id = request.sid
+    session_id = data.get('session_id')
+    
+    if session_id:
+        leave_room(session_id)
+        logger.info(f"Client {client_id} left session {session_id}")
         
-        context = {
-            "session_id": session_id,
-            "career": career
+        emit('session_left', {
+            'session_id': session_id,
+            'status': 'left'
+        })
+
+@socketio.on('message')
+def handle_message(data):
+    """Handle chat messages from frontend"""
+    client_id = request.sid
+    session_id = data.get('session_id')
+    message = data.get('message', '').strip()
+    
+    logger.info(f"Message received from {client_id}: {message[:50]}...")
+    
+    if not session_id or not message:
+        emit('error', {'error': 'Session ID and message required'})
+        return
+    
+    # Get session data
+    session_data = session_service.get_session(session_id)
+    if not session_data:
+        logger.info(f"Creating session data for {session_id}")
+        session_data = {
+            'session_id': session_id,
+            'conversation_history': [],
+            'persona': {},
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
+        session_service.create_session(session_data)
+    
+    # Get persona and conversation history
+    persona = session_data.get('persona', {})
+    conversation_history = session_data.get('conversation_history', [])
+    
+    # Send typing indicator
+    emit('typing', {'status': 'start'}, room=session_id)
+    
+    try:
+        # Generate AI response
+        logger.info(f"Generating AI response for session {session_id}")
+        ai_response = personalized_ai_service.generate_response(
+            message=message,
+            persona=persona,
+            session_id=session_id,
+            conversation_history=conversation_history
+        )
+        
+        # Stop typing indicator
+        emit('typing', {'status': 'stop'}, room=session_id)
+        
+        # Only send response if Gemini generated one
+        if ai_response is not None:
+            # Update conversation history
+            conversation_history.append({
+                'role': 'user',
+                'content': message,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            conversation_history.append({
+                'role': 'assistant',
+                'content': ai_response,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Keep only last 20 messages
+            if len(conversation_history) > 20:
+                conversation_history = conversation_history[-20:]
+            
+            # Update session
+            session_data['conversation_history'] = conversation_history
+            session_data['updated_at'] = datetime.now().isoformat()
+            session_service.update_session(session_id, session_data)
+            
+            # Send response - using 'ai_response' event name to match frontend
+            logger.info(f"Sending AI response to client")
+            emit('ai_response', {
+                'response': ai_response,
+                'session_id': session_id,
+                'timestamp': datetime.now().isoformat()
+            })
+        else:
+            logger.warning(f"No response generated for session {session_id} - Gemini unavailable")
+            # Don't send any response, let the client handle the silence
+        
+    except Exception as e:
+        logger.error(f"Chat message error: {e}", exc_info=True)
+        emit('typing', {'status': 'stop'}, room=session_id)
+        emit('error', {
+            'error': 'Failed to generate response',
+            'message': str(e)
+        })
+
+@socketio.on('ping')
+def handle_ping():
+    """Handle ping for connection keep-alive"""
+    emit('pong', {'timestamp': datetime.now().isoformat()})
+
+# REST API endpoints
+@app.route('/')
+def serve_frontend():
+    """Serve React frontend"""
+    if os.path.exists('../frontend/build/index.html'):
+        return send_from_directory('../frontend/build', 'index.html')
+    else:
+        return jsonify({"message": "Future Self AI API is running. Frontend not built."}), 200
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    services_status = {
+        'api': 'healthy',
+        'personalized_ai': personalized_ai_service.is_model_available(),
+        'gemini': bool(os.getenv('GEMINI_API_KEY')),
+        'sessions': session_service.is_healthy(),
+        'websocket': len(active_connections),
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    overall_health = all([
+        services_status['api'] == 'healthy',
+        services_status['sessions']
+    ])
+    
+    return jsonify({
+        'status': 'healthy' if overall_health else 'degraded',
+        'services': services_status,
+        'active_connections': len(active_connections)
+    }), 200 if overall_health else 503
+
+@app.route('/api/init-session', methods=['POST'])
+@limiter.limit("30 per hour")
+def init_session():
+    """Initialize a new session"""
+    try:
+        session_id = generate_session_id()
+        timestamp = datetime.now().isoformat()
+        
+        session_data = {
+            'session_id': session_id,
+            'created_at': timestamp,
+            'updated_at': timestamp,
+            'status': 'active',
+            'persona': None,
+            'resume_analysis': None,
+            'conversation_history': []
         }
         
-        response = generate_future_self_response(career, message, context)
+        session_service.create_session(session_data)
         
-        if session_id in sessions_store and sessions_store[session_id].get('conversations'):
-            sessions_store[session_id]['conversations'][-1]['messages'].append({
-                "role": "user",
-                "content": message,
-                "timestamp": datetime.now().isoformat()
-            })
-            sessions_store[session_id]['conversations'][-1]['messages'].append({
-                "role": "future_self",
-                "content": response,
-                "timestamp": datetime.now().isoformat()
-            })
+        logger.info(f"Session initialized: {session_id}")
         
-        emit('receive_message', {
-            "message": response,
-            "timestamp": datetime.now().isoformat()
-        }, room=session_id)
-        
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'message': 'Session initialized successfully'
+        })
     except Exception as e:
-        logger.error(f"Message handling error: {e}")
-        emit('error', {"error": str(e)})
+        logger.error(f"Session initialization error: {e}")
+        return jsonify({'error': str(e)}), 500
 
-@socketio.on('start_video_call')
-def handle_start_video_call(data):
+@app.route('/api/analyze-resume', methods=['POST'])
+@limiter.limit("10 per hour")
+def analyze_resume():
+    """Analyze uploaded resume with enhanced analysis"""
     try:
-        session_id = data.get('session_id')
-        career = data.get('career')
+        # Validate request
+        if 'resume' not in request.files:
+            return jsonify({'error': 'No resume file provided'}), 400
         
-        emit('video_call_ready', {
-            "status": "ready",
-            "career": career
-        }, room=session_id)
+        file = request.files['resume']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'Invalid file type. Please upload PDF, DOCX, or TXT'}), 400
+        
+        # Get session ID and career goal
+        session_id = request.form.get('session_id', generate_session_id())
+        career_goal = request.form.get('career_goal', '').lower().replace(' ', '_')
+        
+        # Save file
+        filename = secure_filename(file.filename)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        unique_filename = f"{session_id}_{timestamp}_{filename}"
+        filepath = UPLOAD_FOLDER / unique_filename
+        file.save(str(filepath))
+        
+        logger.info(f"Resume saved: {unique_filename}")
+        
+        # Extract text based on file type
+        try:
+            if filename.lower().endswith('.pdf'):
+                resume_text = extract_text_from_pdf(str(filepath))
+            elif filename.lower().endswith(('.docx', '.doc')):
+                resume_text = extract_text_from_docx(str(filepath))
+            else:
+                with open(str(filepath), 'r', encoding='utf-8', errors='ignore') as f:
+                    resume_text = f.read()
+        except Exception as e:
+            logger.error(f"Text extraction error: {e}")
+            return jsonify({'error': 'Failed to extract text from file'}), 500
+        
+        # Validate extracted text
+        if not resume_text or len(resume_text) < 50:
+            return jsonify({'error': 'Could not extract sufficient text from resume'}), 400
+        
+        # Enhanced resume analysis
+        logger.info("Starting enhanced resume analysis...")
+        resume_analysis = resume_analyzer.analyze_resume(resume_text, career_goal)
+        
+        # Create persona based on analysis
+        logger.info("Creating future self persona...")
+        persona = personalized_ai_service.create_future_self_persona(
+            resume_analysis, 
+            career_goal if career_goal else resume_analysis.get('detected_career', 'software_engineer')
+        )
+        
+        # Add additional insights to persona
+        if 'gemini_insights' in resume_analysis:
+            persona['ai_insights'] = resume_analysis['gemini_insights']
+        
+        # Ensure backward compatibility
+        if 'extracted_info' not in resume_analysis:
+            resume_analysis['extracted_info'] = {
+                'skills': resume_analyzer._flatten_skills(resume_analysis.get('skills', {})),
+                'years_experience': resume_analysis.get('years_experience', 0),
+                'education_level': resume_analysis.get('education_level', 0),
+                'personal_info': resume_analysis.get('personal_info', {})
+            }
+        
+        # Store in session
+        session_data = {
+            'session_id': session_id,
+            'resume_analysis': resume_analysis,
+            'persona': persona,
+            'career_goal': career_goal if career_goal else resume_analysis.get('detected_career'),
+            'updated_at': datetime.now().isoformat(),
+            'conversation_history': []
+        }
+        
+        session_service.update_session(session_id, session_data)
+        
+        # Prepare response
+        response_data = {
+            'success': True,
+            'session_id': session_id,
+            'persona': persona,
+            'resume_analysis': resume_analysis,
+            'extracted_info': resume_analysis.get('extracted_info'),
+            'skills': resume_analysis.get('skills'),
+            'career_match': resume_analysis.get('career_match'),
+            'career_insights': resume_analysis.get('career_insights'),
+            'detected_career': resume_analysis.get('detected_career'),
+            'years_experience': resume_analysis.get('years_experience', 0),
+            'education_level': resume_analysis.get('education_level', 0),
+            'analysis_method': resume_analysis.get('analysis_method', 'Pattern Matching'),
+            'message': 'Resume analyzed successfully!'
+        }
+        
+        logger.info(f"Resume analysis completed for session {session_id}")
+        logger.info(f"Detected career: {resume_analysis.get('detected_career')}")
+        logger.info(f"Skills found: {len(resume_analysis.get('extracted_info', {}).get('skills', []))}")
+        
+        return jsonify(response_data)
         
     except Exception as e:
-        logger.error(f"Video call error: {e}")
-        emit('error', {"error": str(e)})
+        logger.error(f"Resume analysis error: {str(e)}", exc_info=True)
+        return jsonify({
+            'error': f'Failed to analyze resume: {str(e)}',
+            'success': False
+        }), 500
 
-# Static file serving
-@app.route('/static/<path:filepath>')
-def serve_static(filepath):
-    """Serve static files"""
-    return send_from_directory(STATIC_DIR, filepath)
+@app.route('/api/update-career-goal', methods=['POST'])
+@limiter.limit("30 per hour")
+def update_career_goal():
+    """Update career goal and recalculate match"""
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        career_goal = data.get('career_goal', '').lower().replace(' ', '_')
+        
+        if not session_id:
+            return jsonify({'error': 'Session ID required'}), 400
+        
+        # Get session data
+        session_data = session_service.get_session(session_id)
+        if not session_data:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        # Update career goal
+        resume_analysis = session_data.get('resume_analysis', {})
+        
+        # Recalculate career match with new goal
+        if resume_analysis:
+            skills = resume_analysis.get('skills', {})
+            years_exp = resume_analysis.get('years_experience', 0)
+            
+            new_career_match = resume_analyzer._calculate_career_match(
+                skills, career_goal, years_exp
+            )
+            
+            resume_analysis['career_match'] = new_career_match
+            resume_analysis['selected_career'] = career_goal
+        
+        # Update persona
+        persona = personalized_ai_service.create_future_self_persona(
+            resume_analysis, career_goal
+        )
+        
+        # Update session
+        session_data['career_goal'] = career_goal
+        session_data['resume_analysis'] = resume_analysis
+        session_data['persona'] = persona
+        session_data['updated_at'] = datetime.now().isoformat()
+        
+        session_service.update_session(session_id, session_data)
+        
+        return jsonify({
+            'success': True,
+            'career_goal': career_goal,
+            'career_match': new_career_match,
+            'persona': persona,
+            'message': 'Career goal updated successfully'
+        })
+            
+    except Exception as e:
+        logger.error(f"Career goal update error: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# Error handlers
+@app.route('/api/chat', methods=['POST'])
+@limiter.limit("100 per hour")
+def chat():
+    """Chat with future self AI (REST fallback)"""
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        message = data.get('message', '').strip()
+        
+        if not session_id:
+            return jsonify({'error': 'Session ID required'}), 400
+        
+        if not message:
+            return jsonify({'error': 'Message required'}), 400
+        
+        # Get session data
+        session_data = session_service.get_session(session_id)
+        if not session_data:
+            # Create minimal session if doesn't exist
+            session_data = {
+                'session_id': session_id,
+                'persona': {},
+                'conversation_history': [],
+                'created_at': datetime.now().isoformat(),
+                'updated_at': datetime.now().isoformat()
+            }
+            session_service.create_session(session_data)
+        
+        # Get persona and conversation history
+        persona = session_data.get('persona', {})
+        conversation_history = session_data.get('conversation_history', [])
+        
+        # Generate response using enhanced AI
+        logger.info(f"Generating AI response for session {session_id}")
+        
+        ai_response = personalized_ai_service.generate_response(
+            message=message,
+            persona=persona,
+            session_id=session_id,
+            conversation_history=conversation_history
+        )
+        
+        # Only update history and return response if Gemini generated one
+        if ai_response is not None:
+            # Update conversation history
+            conversation_history.append({
+                'role': 'user',
+                'content': message,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            conversation_history.append({
+                'role': 'assistant',
+                'content': ai_response,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Keep only last 20 messages to avoid token limits
+            if len(conversation_history) > 20:
+                conversation_history = conversation_history[-20:]
+            
+            # Update session
+            session_data['conversation_history'] = conversation_history
+            session_data['updated_at'] = datetime.now().isoformat()
+            session_service.update_session(session_id, session_data)
+            
+            return jsonify({
+                'success': True,
+                'response': ai_response,
+                'session_id': session_id,
+                'timestamp': datetime.now().isoformat()
+            })
+        else:
+            logger.warning(f"No response generated for session {session_id} - Gemini unavailable")
+            return jsonify({
+                'success': False,
+                'error': 'No response available',
+                'message': 'Gemini AI is currently unavailable',
+                'session_id': session_id,
+                'timestamp': datetime.now().isoformat()
+            }), 503
+        
+    except Exception as e:
+        logger.error(f"Chat error: {e}", exc_info=True)
+        return jsonify({
+            'error': 'Failed to generate response',
+            'success': False
+        }), 500
+
+@app.route('/api/get-session', methods=['GET'])
+@limiter.limit("100 per hour")
+def get_session():
+    """Get session data"""
+    try:
+        session_id = request.args.get('session_id')
+        
+        if not session_id:
+            return jsonify({'error': 'Session ID required'}), 400
+        
+        session_data = session_service.get_session(session_id)
+        
+        if not session_data:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'session_data': session_data
+        })
+        
+    except Exception as e:
+        logger.error(f"Get session error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/career-database', methods=['GET'])
+def get_career_database():
+    """Get available careers and their requirements"""
+    try:
+        return jsonify({
+            'success': True,
+            'careers': career_database.get_all_careers(),
+            'categories': career_database.get_career_categories()
+        })
+    except Exception as e:
+        logger.error(f"Career database error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/career-details/<career_id>', methods=['GET'])
+def get_career_details(career_id):
+    """Get detailed information about a specific career"""
+    try:
+        career = career_database.get_career(career_id)
+        if not career:
+            return jsonify({'error': 'Career not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'career': career
+        })
+    except Exception as e:
+        logger.error(f"Career details error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/learning-resources', methods=['POST'])
+@limiter.limit("50 per hour")
+def get_learning_resources():
+    """Get learning resources based on skills gap"""
+    try:
+        data = request.json
+        missing_skills = data.get('missing_skills', [])
+        career_goal = data.get('career_goal', 'software_engineer')
+        
+        # Use RAG pipeline if available
+        if rag_pipeline and rag_pipeline.is_available():
+            resources = rag_pipeline.get_learning_resources(missing_skills, career_goal)
+        else:
+            # Fallback to basic recommendations
+            resources = {
+                'courses': [
+                    {
+                        'title': f"Learn {skill}",
+                        'platform': 'Online Learning',
+                        'duration': '4-6 weeks',
+                        'level': 'Beginner to Intermediate'
+                    }
+                    for skill in missing_skills[:5]
+                ],
+                'tutorials': [
+                    f"{skill} Tutorial" for skill in missing_skills[:3]
+                ],
+                'projects': [
+                    f"Build a {career_goal.replace('_', ' ')} project using {missing_skills[0] if missing_skills else 'modern tools'}"
+                ]
+            }
+        
+        return jsonify({
+            'success': True,
+            'resources': resources
+        })
+    except Exception as e:
+        logger.error(f"Learning resources error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export-session', methods=['GET'])
+@limiter.limit("20 per hour")
+def export_session():
+    """Export session data for user download"""
+    try:
+        session_id = request.args.get('session_id')
+        format_type = request.args.get('format', 'json')
+        
+        if not session_id:
+            return jsonify({'error': 'Session ID required'}), 400
+        
+        session_data = session_service.get_session(session_id)
+        if not session_data:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        # Prepare export data
+        export_data = {
+            'session_id': session_id,
+            'exported_at': datetime.now().isoformat(),
+            'persona': session_data.get('persona'),
+            'resume_analysis': session_data.get('resume_analysis'),
+            'career_goal': session_data.get('career_goal'),
+            'conversation_history': session_data.get('conversation_history', [])
+        }
+        
+        if format_type == 'json':
+            return jsonify(export_data)
+        else:
+            return jsonify({'error': 'Unsupported format'}), 400
+        
+    except Exception as e:
+        logger.error(f"Export session error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/feedback', methods=['POST'])
+@limiter.limit("20 per hour")
+def submit_feedback():
+    """Submit user feedback"""
+    try:
+        data = request.json
+        session_id = data.get('session_id')
+        feedback_type = data.get('type', 'general')
+        feedback_text = data.get('feedback', '')
+        rating = data.get('rating', 0)
+        
+        # Store feedback (implement your storage mechanism)
+        feedback_data = {
+            'session_id': session_id,
+            'type': feedback_type,
+            'feedback': feedback_text,
+            'rating': rating,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        # Log feedback for now
+        logger.info(f"Feedback received: {feedback_data}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Thank you for your feedback!'
+        })
+    except Exception as e:
+        logger.error(f"Feedback error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Not found"}), 404
+def not_found(e):
+    """Handle 404 errors"""
+    return jsonify({'error': 'Endpoint not found'}), 404
 
 @app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Internal error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
+def server_error(e):
+    """Handle 500 errors"""
+    logger.error(f"Server error: {e}")
+    return jsonify({'error': 'Internal server error'}), 500
 
-# Main execution
+@app.errorhandler(429)
+def rate_limit_exceeded(e):
+    """Handle rate limit errors"""
+    return jsonify({
+        'error': 'Rate limit exceeded. Please try again later.',
+        'retry_after': e.description
+    }), 429
+
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("FUTURE SELF AI CAREER ADVISOR - ENHANCED VERSION")
-    print("="*60)
-    print(f"Platform: {sys.platform}")
-    print(f"Python: {sys.version}")
-    print("\nFeatures Enabled:")
-    print("✅ Photo Upload & Processing")
-    print("✅ AI-Powered Age Progression")
-    print("✅ Real-time Chat with Future Self")
-    print("✅ WebRTC Video Calls")
-    print("✅ Skills Gap Analysis")
-    print("✅ Career Timeline Generation")
-    print("✅ Resume Analysis")
-    print("✅ Session Management")
-    print("✅ Redis Caching")
-    print("✅ Rate Limiting")
-    print("✅ Enhanced Security")
-    print("\nServer URL: http://localhost:5000")
-    print("WebSocket: ws://localhost:5000/socket.io")
-    print("\nPress Ctrl+C to stop the server")
-    print("="*60 + "\n")
+    # Check environment
+    environment = os.getenv('FLASK_ENV', 'development')
     
-    socketio.run(
-        app,
-        debug=True,
-        host='0.0.0.0',
-        port=5000,
-        use_reloader=False,
-        log_output=True
-    )
+    if environment == 'production':
+        # Production settings
+        socketio.run(
+            app,
+            host='0.0.0.0',
+            port=int(os.getenv('PORT', 5000)),
+            debug=False
+        )
+    else:
+        # Development settings
+        socketio.run(
+            app,
+            host='0.0.0.0',
+            port=5000,
+            debug=True,
+            use_reloader=False  # Set to False to avoid double initialization
+        )

@@ -1,54 +1,27 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { motion } from 'framer-motion';
-import { Card, CardHeader, CardBody, CardTitle, Button, ChatBox, Badge, StatusBadge } from './ui';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Card, CardHeader, CardBody, Button, Badge, StatusBadge } from './ui';
+import ChatBox from './ui/ChatBox';
 import axios from 'axios';
 
-const API_URL = 'https://striking-bravery-production.up.railway.app/api';
+const API_URL = 'http://localhost:5000/api';
 
 const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const [messages, setMessages] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [error, setError] = useState(null);
-  const socketRef = useRef(null);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
   const [showQuickQuestions, setShowQuickQuestions] = useState(true);
+  
+  const socketRef = useRef(null);
+  const chatContainerRef = useRef(null);
 
-  useEffect(() => {
-    // Set initial status based on sessionId
-    if (!sessionId) {
-      setConnectionStatus('no-session');
-    } else {
-      setConnectionStatus('connecting');
-    }
-    
-    // Add personalized welcome message
-    if (persona && sessionId) {
-      const welcomeMessage = {
-        role: 'assistant',
-        content: `Hey ${persona.name || 'Friend'}! I'm you from 10 years in the future, now a ${persona.current_role || 'successful professional'}. I've been where you are now, and I want to share everything I've learned to help you succeed. I remember the uncertainty, the excitement, the fear - all of it. But here I am, 10 years later, and I can tell you: the journey is worth every step. What's on your heart today?`,
-        timestamp: Date.now()
-      };
-      setMessages([welcomeMessage]);
-      setConnectionStatus('ready');
-    }
-
-    // Initialize Socket.IO connection
-    if (sessionId) {
-      initializeSocket();
-    }
-
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
-    };
-  }, [persona, sessionId]);
-
-  const initializeSocket = () => {
+  // Initialize Socket.IO connection
+  const initializeSocket = useCallback(() => {
     try {
       import('socket.io-client').then(({ io }) => {
-        socketRef.current = io('https://striking-bravery-production.up.railway.app', {
+        socketRef.current = io('http://localhost:5000', {
           transports: ['websocket', 'polling'],
           reconnection: true,
           reconnectionAttempts: 5,
@@ -108,12 +81,41 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
       setIsConnected(false);
       setConnectionStatus('ready');
     }
-  };
+  }, [sessionId]);
 
-  const handleSendMessage = async (message) => {
-    if (!message || !message.trim()) {
-      return;
+  // Initialize component
+  useEffect(() => {
+    if (!sessionId) {
+      setConnectionStatus('no-session');
+    } else {
+      setConnectionStatus('connecting');
     }
+    
+    // Add personalized welcome message
+    if (persona && sessionId) {
+      const welcomeMessage = {
+        role: 'assistant',
+        content: `🌟 Welcome to the future, ${persona.name || 'Friend'}! I'm you from 10 years ahead, now a ${persona.current_role || 'successful professional'}. I've traveled through time to share everything I've learned on this incredible journey. I remember the uncertainty you feel now, the excitement, the fear - all of it. But here I am, 10 years later, and I can tell you: the journey is absolutely worth every step. What's on your mind today? What would you like to know about your future?`,
+        timestamp: Date.now()
+      };
+      setMessages([welcomeMessage]);
+      setConnectionStatus('ready');
+    }
+
+    if (sessionId) {
+      initializeSocket();
+    }
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, [persona, sessionId, initializeSocket]);
+
+  // Handle message sending
+  const handleSendMessage = async (message) => {
+    if (!message || !message.trim()) return;
 
     if (!sessionId) {
       setError('Session not found. Please upload your resume first.');
@@ -152,6 +154,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
     }
   };
 
+  // HTTP fallback
   const sendViaHttp = async (message) => {
     try {
       const response = await axios.post(`${API_URL}/chat`, {
@@ -183,6 +186,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
     }
   };
 
+  // Error handling
   const handleSendError = (error) => {
     setIsTyping(false);
     
@@ -196,19 +200,22 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
       setError('Unable to send message. Please try again.');
     }
 
-    // Auto-hide error after 5 seconds
     setTimeout(() => setError(null), 5000);
   };
 
+  // Quick questions
   const quickQuestions = [
     "What should I focus on next?",
     "How did you overcome imposter syndrome?",
     "What skills changed everything for you?",
     "Tell me about your biggest breakthrough",
     "What would you do differently?",
-    "How did you find work-life balance?"
+    "How did you find work-life balance?",
+    "What opportunities should I pursue?",
+    "How did you handle failures?"
   ];
 
+  // Status helpers
   const getDisplayStatus = () => {
     if (!sessionId) return 'offline';
     if (isConnected) return 'online';
@@ -223,30 +230,41 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   };
 
   return (
-    <div className="h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 flex flex-col">
-      {/* Fixed Header */}
-      <div className="flex-shrink-0 p-4 lg:p-6 pb-0">
+    <div className="h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-cyan-900 flex flex-col overflow-hidden">
+      {/* Animated Background */}
+      <div className="absolute inset-0 overflow-hidden">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500/20 rounded-full blur-3xl animate-pulse" />
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-cyan-500/20 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '1s' }} />
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-pink-500/10 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
+      </div>
+
+      {/* Header */}
+      <div className="relative z-10 flex-shrink-0 p-4 sm:p-6 pb-0">
         <motion.div
-          initial={{ opacity: 0, y: -20 }}
+          initial={{ opacity: 0, y: -30 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
+          transition={{ duration: 0.6, ease: "easeOut" }}
         >
-          <Card variant="glass" className="backdrop-blur-xl bg-white/5 border border-white/10">
-            <CardHeader className="p-4 lg:p-6">
+          <Card variant="glass" className="backdrop-blur-2xl bg-gradient-to-r from-slate-800/30 to-purple-800/20 border border-cyan-500/20 shadow-2xl shadow-cyan-500/10">
+            <CardHeader className="p-4 sm:p-6">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <motion.div
-                    whileHover={{ scale: 1.05, rotate: 5 }}
+                    whileHover={{ scale: 1.1, rotate: 10 }}
                     className="relative"
                   >
-                    <div className="w-14 h-14 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-2xl flex items-center justify-center shadow-lg shadow-purple-500/25">
-                      <span className="text-2xl">🔮</span>
+                    <div className="w-12 h-12 sm:w-16 sm:h-16 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-3xl flex items-center justify-center shadow-lg shadow-purple-500/25">
+                      <span className="text-2xl sm:text-3xl">🔮</span>
                     </div>
-                    <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-green-400 rounded-full animate-pulse" />
+                    <motion.div 
+                      className="absolute -bottom-1 -right-1 w-3 h-3 sm:w-4 sm:h-4 bg-green-400 rounded-full"
+                      animate={{ scale: [1, 1.2, 1] }}
+                      transition={{ duration: 2, repeat: Infinity }}
+                    />
                   </motion.div>
                   
                   <div>
-                    <h1 className="text-2xl font-bold bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">
+                    <h1 className="text-xl sm:text-3xl font-bold bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
                       Future Self Chat
                     </h1>
                     <div className="flex items-center gap-2 mt-1">
@@ -262,9 +280,9 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
                   </Badge>
                   <Button 
                     variant="ghost" 
-                    size="md" 
+                    size="sm"
                     onClick={onBack}
-                    className="hover:bg-white/10"
+                    className="hover:bg-white/10 text-sm"
                   >
                     ← Back
                   </Button>
@@ -276,73 +294,79 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
       </div>
 
       {/* Error Alert */}
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, x: 300 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: 300 }}
-          className="absolute top-24 right-4 z-50 max-w-sm"
-        >
-          <div className="bg-red-500/10 backdrop-blur-xl border border-red-500/20 rounded-xl p-4 flex items-start gap-3">
-            <span className="text-red-400 text-lg">⚠️</span>
-            <div className="flex-1">
-              <p className="text-red-400 text-sm">{error}</p>
+      <AnimatePresence>
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, x: 300, scale: 0.8 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 300, scale: 0.8 }}
+            className="absolute top-24 right-4 z-50 max-w-sm"
+          >
+            <div className="bg-red-500/10 backdrop-blur-xl border border-red-500/20 rounded-2xl p-4 flex items-start gap-3 shadow-lg">
+              <span className="text-red-400 text-lg">⚠️</span>
+              <div className="flex-1">
+                <p className="text-red-400 text-sm">{error}</p>
+              </div>
+              <button 
+                onClick={() => setError(null)}
+                className="text-red-400 hover:text-red-300 transition-colors"
+              >
+                ✕
+              </button>
             </div>
-            <button 
-              onClick={() => setError(null)}
-              className="text-red-400 hover:text-red-300 transition-colors"
-            >
-              ✕
-            </button>
-          </div>
-        </motion.div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Main Chat Area */}
-      <div className="flex-1 px-4 lg:px-6 py-4 min-h-0 flex flex-col gap-4">
+      <div className="relative z-10 flex-1 px-4 sm:px-6 py-4 min-h-0 flex flex-col gap-4 overflow-hidden">
         <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5, delay: 0.1 }}
-          className="flex-1 min-h-0"
+          transition={{ duration: 0.6, delay: 0.2 }}
+          className="flex-1 min-h-0 flex flex-col"
+          ref={chatContainerRef}
         >
           <Card 
             variant="glass" 
-            className="h-full backdrop-blur-xl bg-white/5 border border-white/10 overflow-hidden"
+            className="flex-1 backdrop-blur-2xl bg-gradient-to-br from-slate-800/20 to-purple-800/10 border border-cyan-500/20 overflow-hidden flex flex-col shadow-2xl shadow-cyan-500/10"
           >
-            <CardBody className="p-0 h-full flex flex-col">
-              {/* Quick Questions - Shows at top when no messages */}
-              {showQuickQuestions && messages.length <= 1 && (
-                <motion.div
-                  initial={{ opacity: 0, y: -20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-4 border-b border-white/10 bg-gradient-to-b from-purple-500/10 to-transparent"
-                >
-                  <p className="text-center text-white/60 text-sm mb-3">
-                    Quick conversation starters
-                  </p>
-                  <div className="flex flex-wrap justify-center gap-2">
-                    {quickQuestions.map((question, index) => (
-                      <motion.button
-                        key={index}
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: index * 0.05 }}
-                        onClick={() => handleSendMessage(question)}
-                        disabled={isTyping || !sessionId}
-                        className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-white/80 hover:text-white rounded-full text-xs transition-all duration-300 border border-white/20 hover:border-white/30 disabled:opacity-50 disabled:cursor-not-allowed backdrop-blur-sm"
-                      >
-                        {question}
-                      </motion.button>
-                    ))}
-                  </div>
-                </motion.div>
-              )}
+            <CardBody className="p-0 flex-1 flex flex-col min-h-0">
+              {/* Quick Questions */}
+              <AnimatePresence>
+                {showQuickQuestions && messages.length <= 1 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -20 }}
+                    className="p-4 sm:p-6 border-b border-gradient-to-r from-cyan-500/20 to-purple-500/20 bg-gradient-to-r from-purple-500/10 to-cyan-500/10"
+                  >
+                    <p className="text-center text-white/60 text-sm mb-4">
+                      💫 Quick conversation starters
+                    </p>
+                    <div className="flex flex-wrap justify-center gap-2 sm:gap-3">
+                      {quickQuestions.map((question, index) => (
+                        <motion.button
+                          key={index}
+                          whileHover={{ scale: 1.05, y: -2 }}
+                          whileTap={{ scale: 0.95 }}
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: index * 0.05 }}
+                          onClick={() => handleSendMessage(question)}
+                          disabled={isTyping || !sessionId}
+                          className="px-3 sm:px-4 py-2 sm:py-2.5 bg-gradient-to-r from-slate-700/50 to-purple-700/50 hover:from-cyan-600/50 hover:to-purple-600/50 text-white/80 hover:text-white rounded-2xl text-xs sm:text-sm transition-all duration-300 border border-white/20 hover:border-cyan-400/50 disabled:opacity-50 disabled:cursor-not-allowed backdrop-blur-sm shadow-lg hover:shadow-xl"
+                        >
+                          {question}
+                        </motion.button>
+                      ))}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               
               {/* Chat Messages Area */}
-              <div className="flex-1 min-h-0">
+              <div className="flex-1 min-h-0 relative">
                 <ChatBox
                   messages={messages}
                   onSendMessage={handleSendMessage}
@@ -353,7 +377,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
                   }
                   disabled={!sessionId}
                   isTyping={isTyping}
-                  className="h-full"
+                  className="absolute inset-0"
                 />
               </div>
             </CardBody>
@@ -362,33 +386,37 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
       </div>
 
       {/* Bottom Navigation */}
-      <div className="flex-shrink-0 p-4 lg:p-6 pt-0">
+      <div className="relative z-10 flex-shrink-0 p-4 sm:p-6 pt-0">
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 30 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-          className="flex justify-between items-center"
+          transition={{ duration: 0.6, delay: 0.4 }}
+          className="flex justify-between items-center gap-4"
         >
           <Button 
             variant="secondary" 
             onClick={onBack}
-            size="lg"
-            className="hover:scale-105 transition-transform"
+            size="sm"
+            className="hover:scale-105 transition-transform text-sm"
           >
-            ← Back to Dashboard
+            ← Back
           </Button>
           
           <div className="hidden sm:flex items-center gap-2 text-white/50 text-sm">
-            <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+            <motion.div 
+              className="w-2 h-2 bg-green-400 rounded-full"
+              animate={{ scale: [1, 1.2, 1] }}
+              transition={{ duration: 2, repeat: Infinity }}
+            />
             <span>Your future self is ready to chat</span>
           </div>
           
           <Button 
             onClick={onNext}
-            size="lg"
-            className="hover:scale-105 transition-transform bg-gradient-to-r from-cyan-500 to-purple-500"
+            size="sm"
+            className="hover:scale-105 transition-transform bg-gradient-to-r from-cyan-500 to-purple-500 text-sm"
           >
-            Continue Journey →
+            Continue →
           </Button>
         </motion.div>
       </div>

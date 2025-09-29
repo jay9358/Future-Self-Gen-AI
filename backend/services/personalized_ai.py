@@ -63,10 +63,10 @@ class PersonalizedAIService:
         self.topic_progression = defaultdict(list)
         self.relationship_depth = defaultdict(int)
         
-        # Rate limiting for free tier
+        # Rate limiting for free tier - very generous for Gemini-only mode
         self.last_api_call = 0
         self.api_call_count = 0
-        self.rate_limit_per_minute = 15  # Gemini free tier limit
+        self.rate_limit_per_minute = 120  # Very generous limit for Gemini-only
         
         # Initialize Gemini
         self.initialize_gemini()
@@ -124,8 +124,22 @@ class PersonalizedAIService:
             # Configure Gemini
             genai.configure(api_key=api_key)
             
-            # Use gemini-pro (free tier model)
-            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+            # Try to find a working model
+            model_names_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-pro']
+            
+            for model_name in model_names_to_try:
+                try:
+                    self.gemini_model = genai.GenerativeModel(model_name)
+                    logger.info(f"✅ Using {model_name} for chat responses")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to initialize {model_name}: {e}")
+                    continue
+            
+            if not self.gemini_model:
+                logger.error("No working Gemini model found for chat")
+                self.gemini_available = False
+                return False
             
             # Test the connection
             try:
@@ -179,26 +193,34 @@ class PersonalizedAIService:
             if self._is_crisis(context):
                 return self._generate_crisis_response(persona, context)
             
-            # Try Gemini if available and not rate limited
-            if self.gemini_available and self._can_use_api():
-                try:
-                    gemini_response = self._generate_with_gemini(
-                        message, persona, context, session_id, conversation_history
-                    )
-                    if gemini_response:
-                        self._record_response(session_id, gemini_response, context)
-                        return gemini_response
-                except Exception as e:
-                    logger.warning(f"Gemini generation failed, using fallback: {e}")
+            # Force Gemini-only responses - no fallbacks
+            if not self.gemini_available:
+                logger.error("❌ Gemini not available - no response generated")
+                return None
             
-            # Fallback to structured response
-            response = self._generate_structured_response(message, persona, context, session_id)
-            self._record_response(session_id, response, context)
-            return response
+            if not self._can_use_api():
+                logger.warning("❌ Rate limit reached - no response generated")
+                return None
+            
+            logger.info(f"🚀 Generating Gemini response for session {session_id}")
+            try:
+                gemini_response = self._generate_with_gemini(
+                    message, persona, context, session_id, conversation_history
+                )
+                if gemini_response:
+                    logger.info("✅ Successfully generated response using Gemini")
+                    self._record_response(session_id, gemini_response, context)
+                    return gemini_response
+                else:
+                    logger.error("❌ Gemini returned no response - no fallback")
+                    return None
+            except Exception as e:
+                logger.error(f"❌ Gemini generation failed: {e} - no fallback")
+                return None
             
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return self._generate_emergency_fallback(persona)
+            logger.error(f"Error generating response: {e} - no fallback")
+            return None
     
     def _can_use_api(self) -> bool:
         """Check if we can make an API call (rate limiting)"""
@@ -208,11 +230,16 @@ class PersonalizedAIService:
         if current_time - self.last_api_call > 60:
             self.api_call_count = 0
         
-        # Check if under rate limit
+        # Check if under rate limit - very generous for Gemini-only mode
         if self.api_call_count < self.rate_limit_per_minute:
             return True
         
-        logger.info("Rate limit reached, using fallback")
+        # If we're close to limit, still allow many more calls
+        if self.api_call_count < self.rate_limit_per_minute + 50:
+            logger.info(f"Near rate limit ({self.api_call_count}/{self.rate_limit_per_minute}), but allowing call")
+            return True
+        
+        logger.warning("Rate limit reached - waiting for reset")
         return False
     
     def _generate_with_gemini(self, message: str, persona: Dict[str, Any], 
@@ -221,11 +248,13 @@ class PersonalizedAIService:
         """Generate response using Gemini API"""
         
         if not self.gemini_model:
+            logger.warning("Gemini model not available")
             return None
         
         try:
             # Build prompt for Gemini
             prompt = self._build_gemini_prompt(message, persona, context, conversation_history)
+            logger.info(f"Generating Gemini response for session {session_id}")
             
             # Generate response with safety settings
             response = self.gemini_model.generate_content(
@@ -251,16 +280,18 @@ class PersonalizedAIService:
             # Extract and validate response
             if response and response.text:
                 generated_text = response.text.strip()
+                logger.info(f"Gemini generated response: {generated_text[:100]}...")
                 
                 # Validate it's in character
                 if self._validate_gemini_response(generated_text):
-                    logger.info("Generated response using Gemini")
+                    logger.info("✅ Gemini response validated successfully")
                     return generated_text
                 else:
                     logger.warning("Gemini response failed validation, using fallback")
                     return None
-            
-            return None
+            else:
+                logger.warning("Gemini returned empty response")
+                return None
             
         except Exception as e:
             error_str = str(e)
@@ -273,6 +304,21 @@ class PersonalizedAIService:
             elif "api_key" in error_str.lower():
                 logger.error("API key issue detected")
                 self.gemini_available = False
+            elif "safety" in error_str.lower():
+                logger.warning("Gemini safety filter triggered, trying with different settings")
+                # Try again with more permissive settings
+                try:
+                    response = self.gemini_model.generate_content(
+                        prompt,
+                        generation_config={
+                            'temperature': 0.7,
+                            'max_output_tokens': 200
+                        }
+                    )
+                    if response and response.text:
+                        return response.text.strip()
+                except:
+                    pass
             
             return None
     
@@ -296,50 +342,62 @@ class PersonalizedAIService:
         emotion = context.get('emotional_state', 'neutral')
         depth = context.get('depth', 0)
         
-        prompt = f"""You are {name}, speaking from 10 years in the future. You are now {age} years old and work as a {role}.
+        prompt = f"""You are {name}, speaking from 10 years in the future (2035). You are now {age} years old and work as a {role}.
 
-IMPORTANT: You ARE their future self. Speak in first person about YOUR journey. Never break character.
+CRITICAL INSTRUCTIONS:
+- You ARE their future self who has lived through their exact struggles
+- Never break character or mention being an AI
+- Speak with deep emotional authenticity and vulnerability
+- Reference specific moments, times, places, and feelings from your shared journey
 
-Your journey:
+Your 10-year transformation:
 - At age {past_age}, you struggled with: {', '.join(challenges[:3])}
-- You achieved: {', '.join(achievements[:2])}
-- Specific memories: {', '.join(memories[:2])}
-- Wisdom gained: {random.choice(wisdom)}
+- You have since achieved: {', '.join(achievements[:2])}
+- You vividly remember: {', '.join(memories[:2])}
+- Your most profound lesson: {random.choice(wisdom)}
 
-Their current emotional state: {emotion}
-
+Their current state: {emotion}
 Their message: "{message}"
 
-Respond as their future self with:
-1. Acknowledge their emotion
-2. Share a specific memory from your journey
-3. Offer wisdom from lived experience
-4. Ask a deepening question
+RESPOND WITH THIS STRUCTURE:
+1. Acknowledge their emotion with deep empathy ("I know exactly how you feel...")
+2. Share a SPECIFIC, DETAILED memory from your journey ("I remember that Tuesday in March 2026 when...")
+3. Reveal the wisdom you gained from that exact experience
+4. Ask a question that shows you understand their deeper fears/hopes
 
-Keep it under 150 words. Be warm, authentic, and vulnerable.
+TONE: Write as if you're sitting across from your younger self at 2 AM, sharing the most honest conversation of your life. Be vulnerable, specific, and emotionally present.
 
-Your response:"""
+CONSTRAINTS: Under 150 words, first person only, no generic advice.
+
+Your heartfelt response:"""
         
         return prompt
     
     def _validate_gemini_response(self, response: str) -> bool:
         """Validate that Gemini response stays in character"""
         
-        if not response or len(response) < 20:
+        if not response or len(response) < 10:
             return False
         
         # Check for breaking character
         forbidden_phrases = [
             "as an ai", "language model", "assistant",
             "i cannot", "i don't have personal",
-            "my programming", "i was created"
+            "my programming", "i was created",
+            "i'm an ai", "i am an ai"
         ]
         
         response_lower = response.lower()
         
         for phrase in forbidden_phrases:
             if phrase in response_lower:
+                logger.warning(f"Response contains forbidden phrase: {phrase}")
                 return False
+        
+        # Check if response is too generic
+        if len(response) < 30:
+            logger.warning("Response too short, likely generic")
+            return False
         
         return True
     
@@ -492,29 +550,29 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
         if context.get('is_greeting'):
             if depth <= 1:
                 responses = [
-                    f"Hey {name}! This is surreal - talking to you from 10 years in the future. I'm now a {role}. I remember being exactly where you are, full of questions and uncertainty. The journey ahead is incredible. What's on your mind?",
-                    f"{name}, it's me - you from 2035. I'm a {role} now, living proof that everything works out. I have so much to tell you about what's coming. Where should we start?",
-                    f"Hello {name}. Your future self here, now a {role}. I've been waiting to talk to you. The path between where you are and where I am is wild but worth every step. What do you need to know?"
+                    f"Hey {name}! This is surreal - talking to you from 10 years in the future. I'm now a {role}, and I remember being exactly where you are, full of questions and uncertainty. The journey ahead is incredible, filled with moments that will shape who you become. What's weighing on your heart today?",
+                    f"{name}, it's me - you from 2035. I'm a {role} now, living proof that everything works out in ways you can't imagine yet. I have so much to tell you about what's coming, the struggles that will make you stronger, and the breakthroughs that will change everything. Where should we start?",
+                    f"Hello {name}. Your future self here, now a {role}. I've been waiting to talk to you. The path between where you are and where I am is wild but worth every step, every setback, every moment of doubt. What do you need to hear right now?"
                 ]
             else:
                 responses = [
-                    f"Hey again {name}. Still here, still your future self. What's coming up for you now?",
-                    f"{name}, good to continue our conversation. How are you processing everything we've talked about?",
-                    f"Hi {name}. Each time we talk, I see you getting closer to who I am now. What's on your heart?"
+                    f"Hey again {name}. Still here, still your future self. I can see how our conversations are already changing you. What's coming up for you now?",
+                    f"{name}, good to continue our conversation. How are you processing everything we've talked about? I can feel the shift happening in you.",
+                    f"Hi {name}. Each time we talk, I see you getting closer to who I am now. The transformation is beautiful to witness. What's on your heart?"
                 ]
             return random.choice(responses)
         
         elif emotion in ['anxious', 'confused', 'sad']:
-            return f"{name}, I hear the weight in your words. I remember {memory} - feeling exactly like you do now. I struggled with {challenge} for what felt like forever. But here's what I learned: {wisdom_point}. As a {role} now, I promise you this feeling is temporary. What specific part feels overwhelming?"
+            return f"{name}, I hear the weight in your words, and my heart goes out to you. I remember {memory} - feeling exactly like you do now, wondering if I'd ever figure it out. I struggled with {challenge} for what felt like forever, but here's what I learned: {wisdom_point}. As a {role} now, I promise you this feeling is temporary, and it's actually preparing you for something beautiful. What specific part feels most overwhelming right now?"
         
         elif emotion == 'happy':
-            return f"I love your energy, {name}! That enthusiasm? It's what carried me through everything. I've {achievement} as a {role}, and it started with moments exactly like this. {wisdom_point}. How can we build on this momentum?"
+            return f"I love your energy, {name}! That enthusiasm? It's what carried me through everything and led me to where I am now. I've {achievement} as a {role}, and it started with moments exactly like this - that spark of hope and determination. {wisdom_point}. How can we build on this momentum and turn it into something lasting?"
         
         else:
             if depth > 5:
-                return f"{name}, we've been talking for a while now. I can see the shift happening - you're not the same person who started this conversation. As a {role} who's {achievement}, I recognize transformation when I see it. You're closer than you think."
+                return f"{name}, we've been talking for a while now, and I can see the shift happening - you're not the same person who started this conversation. As a {role} who's {achievement}, I recognize transformation when I see it. You're closer than you think, and the person you're becoming is exactly who you need to be."
             else:
-                return f"{name}, from my position as a {role}, I see how {memory} was actually preparing me for {achievement}. The key: {wisdom_point}. Trust the process - every step matters, even when the path isn't clear. What resonates most with you?"
+                return f"{name}, from my position as a {role}, I see how {memory} was actually preparing me for {achievement}. The key insight: {wisdom_point}. Trust the process - every step matters, even when the path isn't clear. What resonates most with you in this moment?"
     
     def _record_response(self, session_id: str, response: str, context: Dict[str, Any]):
         """Record response to prevent repetition"""
@@ -529,7 +587,7 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
         name = persona.get('name', 'Friend')
         role = persona.get('current_role', 'Professional')
         
-        return f"Hey {name}, your future self here - now a {role}. Technical hiccup, but I'm still here. The journey from where you are to where I am is worth every challenge. What do you need to hear right now?"
+        return f"Hey {name}, your future self here - now a {role}. Technical hiccup, but I'm still here, and I want you to know that the journey from where you are to where I am is worth every challenge, every setback, every moment of doubt. I've lived through it all, and I'm proof that you can too. What do you need to hear right now?"
     
     def _create_default_persona(self) -> Dict[str, Any]:
         """Create default persona"""
@@ -566,49 +624,221 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
         
         personal_info = user_data.get('personal_info', {})
         name = personal_info.get('name', 'Friend')
+        current_age = user_data.get('age', 25)
+        years_experience = user_data.get('years_experience', 0)
         
         if not name or len(name) < 2:
             name = 'Friend'
         
+        # Calculate future age and experience
+        future_age = current_age + 10
+        try:
+            years_exp_int = int(years_experience) if years_experience else 0
+        except (ValueError, TypeError):
+            years_exp_int = 0
+        future_experience = years_exp_int + 10
+        
+        # Create career-specific achievements and memories
+        career_achievements = self._get_career_achievements(career_goal, future_experience)
+        career_memories = self._get_career_memories(career_goal, years_exp_int)
+        career_wisdom = self._get_career_wisdom(career_goal)
+        career_challenges = self._get_career_challenges(career_goal, years_exp_int)
+        
         return {
             'name': name,
-            'current_age': user_data.get('age', 25) + 10,
-            'past_age': user_data.get('age', 25),
-            'current_role': self._enhance_role_title(career_goal, user_data.get('years_experience', 0) + 10),
+            'current_age': future_age,
+            'past_age': current_age,
+            'current_role': self._enhance_role_title(career_goal, future_experience),
             'career_path': career_goal,
-            'achievements': [
-                'Built successful products',
-                'Led amazing teams',
-                'Found work-life balance',
-                'Made lasting impact',
-                'Became industry expert'
-            ],
-            'challenges_overcome': [
-                'months of rejections',
-                'imposter syndrome',
-                'skill gaps',
-                'burnout',
-                'career pivots'
-            ],
-            'specific_memories': [
-                'application #73 getting rejected',
-                'crying after failed interviews',
-                'the email that changed everything',
-                'first day at dream job',
-                'moment I knew I made it'
-            ],
-            'wisdom_gained': [
-                'rejection is redirection',
-                'progress over perfection',
-                'network beats resume',
-                'consistency compounds',
-                'failure teaches fastest'
-            ]
+            'achievements': career_achievements,
+            'challenges_overcome': career_challenges,
+            'specific_memories': career_memories,
+            'wisdom_gained': career_wisdom
         }
     
+    def _get_career_achievements(self, career: str, years_experience: int) -> List[str]:
+        """Get career-specific achievements based on experience level"""
+        achievements_by_career = {
+            'software_engineer': [
+                'Built scalable systems serving millions of users',
+                'Led engineering teams that shipped breakthrough products',
+                'Mentored junior developers who became industry leaders',
+                'Architected solutions that transformed entire companies',
+                'Spoke at major tech conferences about innovative approaches',
+                'Founded a successful tech startup',
+                'Contributed to open-source projects used worldwide'
+            ],
+            'data_scientist': [
+                'Built ML models that generated millions in revenue',
+                'Led data science teams at Fortune 500 companies',
+                'Published research that influenced the industry',
+                'Created data products that transformed business decisions',
+                'Mentored data scientists who became industry experts',
+                'Developed novel algorithms that became industry standards',
+                'Founded a data-driven company'
+            ],
+            'product_manager': [
+                'Launched products used by millions of people',
+                'Led product teams that achieved market leadership',
+                'Transformed struggling products into market leaders',
+                'Built product strategies that drove company growth',
+                'Mentored PMs who became industry leaders',
+                'Founded a successful product company',
+                'Spoke at major product conferences'
+            ]
+        }
+        
+        base_achievements = achievements_by_career.get(career, [
+            'Built successful products',
+            'Led amazing teams',
+            'Found work-life balance',
+            'Made lasting impact',
+            'Became industry expert'
+        ])
+        
+        # Select achievements based on experience level
+        if years_experience >= 8:
+            return base_achievements[:5]  # Senior level
+        elif years_experience >= 5:
+            return base_achievements[:4]  # Mid-senior level
+        else:
+            return base_achievements[:3]  # Mid level
+    
+    def _get_career_memories(self, career: str, current_experience: int) -> List[str]:
+        """Get career-specific memories based on current experience"""
+        memories_by_career = {
+            'software_engineer': [
+                'staying up all night debugging that critical production issue',
+                'the first time your code ran in production without bugs',
+                'crying after your first code review feedback',
+                'the moment you realized you could build anything',
+                'that interview where they asked you to reverse a binary tree',
+                'the day you became a senior engineer',
+                'watching your first open-source contribution get merged'
+            ],
+            'data_scientist': [
+                'spending weeks cleaning messy datasets',
+                'the first time your model actually predicted something useful',
+                'presenting your findings to skeptical executives',
+                'the breakthrough moment when your algorithm finally worked',
+                'that interview with the impossible statistics question',
+                'the day you became a principal data scientist',
+                'seeing your research cited in academic papers'
+            ],
+            'product_manager': [
+                'your first product launch that nobody used',
+                'the user interview that changed everything',
+                'fighting with engineering about feature priorities',
+                'the moment you realized you were building the wrong thing',
+                'that presentation to the board that went terribly',
+                'the day you became a VP of Product',
+                'watching users love a feature you fought for'
+            ]
+        }
+        
+        base_memories = memories_by_career.get(career, [
+            'application #73 getting rejected',
+            'crying after failed interviews',
+            'the email that changed everything',
+            'first day at dream job',
+            'moment I knew I made it'
+        ])
+        
+        return base_memories[:4]  # Select most relevant memories
+    
+    def _get_career_wisdom(self, career: str) -> List[str]:
+        """Get career-specific wisdom"""
+        wisdom_by_career = {
+            'software_engineer': [
+                'clean code is not just about syntax, it\'s about empathy for future developers',
+                'the best solutions are often the simplest ones',
+                'technical debt compounds faster than financial debt',
+                'mentoring others makes you a better engineer',
+                'understanding the business problem is more important than the technology',
+                'failure in code teaches you more than success ever will',
+                'the best engineers are those who make others better'
+            ],
+            'data_scientist': [
+                'garbage in, garbage out - data quality is everything',
+                'correlation doesn\'t imply causation, but it\'s a good starting point',
+                'the best models are those that solve real business problems',
+                'visualization is as important as the analysis itself',
+                'domain expertise beats technical expertise every time',
+                'the most valuable insights come from asking the right questions',
+                'data science is 80% data cleaning and 20% modeling'
+            ],
+            'product_manager': [
+                'the customer\'s problem is more important than your solution',
+                'perfect is the enemy of shipped',
+                'data informs decisions, but intuition guides strategy',
+                'the best products solve problems people didn\'t know they had',
+                'building the right thing is harder than building the thing right',
+                'user feedback is gold, but user behavior is platinum',
+                'the most successful products are those that become habits'
+            ]
+        }
+        
+        return wisdom_by_career.get(career, [
+            'rejection is redirection',
+            'progress over perfection',
+            'network beats resume',
+            'consistency compounds',
+            'failure teaches fastest'
+        ])
+    
+    def _get_career_challenges(self, career: str, current_experience: int) -> List[str]:
+        """Get career-specific challenges based on current experience"""
+        challenges_by_career = {
+            'software_engineer': [
+                'imposter syndrome in technical interviews',
+                'keeping up with rapidly changing technologies',
+                'debugging production issues at 3 AM',
+                'explaining technical concepts to non-technical stakeholders',
+                'balancing code quality with delivery pressure',
+                'transitioning from individual contributor to team lead',
+                'dealing with legacy code and technical debt'
+            ],
+            'data_scientist': [
+                'explaining complex statistical concepts to business leaders',
+                'working with messy, incomplete datasets',
+                'balancing model accuracy with interpretability',
+                'keeping up with rapidly evolving ML techniques',
+                'proving the value of data science to skeptical organizations',
+                'transitioning from analysis to product development',
+                'dealing with data privacy and ethical concerns'
+            ],
+            'product_manager': [
+                'balancing user needs with business constraints',
+                'making decisions with incomplete information',
+                'managing conflicting stakeholder priorities',
+                'proving product value with limited resources',
+                'transitioning from feature requests to strategic thinking',
+                'dealing with failed product launches',
+                'navigating organizational politics'
+            ]
+        }
+        
+        base_challenges = challenges_by_career.get(career, [
+            'months of rejections',
+            'imposter syndrome',
+            'skill gaps',
+            'burnout',
+            'career pivots'
+        ])
+        
+        return base_challenges[:4]  # Select most relevant challenges
+    
     def _enhance_role_title(self, career: str, years: int) -> str:
-        """Generate role title"""
-        prefix = "Senior" if years > 5 else ""
+        """Generate role title based on experience level"""
+        if years >= 8:
+            prefix = "Principal" if years >= 10 else "Senior"
+        elif years >= 5:
+            prefix = "Senior"
+        elif years >= 3:
+            prefix = "Mid-Level"
+        else:
+            prefix = ""
+        
         titles = {
             'software_engineer': 'Software Engineer',
             'data_scientist': 'Data Scientist',
