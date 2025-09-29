@@ -19,7 +19,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Add project root to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.append(project_root)
+sys.path.append(current_dir)
 
 # Import services
 from services.session_service import SessionService
@@ -41,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Initialize Flask app
-app = Flask(__name__, static_folder='../frontend/build', static_url_path='')
+app = Flask(__name__, static_folder=os.path.join(project_root, 'frontend', 'build'), static_url_path='')
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB max file size
 app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
@@ -83,7 +86,7 @@ session_service = SessionService()
 resume_analyzer = ResumeAnalyzer()
 
 # File upload configuration
-UPLOAD_FOLDER = Path('uploads')
+UPLOAD_FOLDER = Path(current_dir) / 'uploads'
 ALLOWED_EXTENSIONS = {'pdf', 'docx', 'doc', 'txt'}
 UPLOAD_FOLDER.mkdir(exist_ok=True)
 
@@ -277,8 +280,9 @@ def handle_ping():
 @app.route('/')
 def serve_frontend():
     """Serve React frontend"""
-    if os.path.exists('../frontend/build/index.html'):
-        return send_from_directory('../frontend/build', 'index.html')
+    frontend_path = os.path.join(project_root, 'frontend', 'build', 'index.html')
+    if os.path.exists(frontend_path):
+        return send_from_directory(os.path.join(project_root, 'frontend', 'build'), 'index.html')
     else:
         return jsonify({"message": "Future Self AI API is running. Frontend not built."}), 200
 
@@ -774,6 +778,7 @@ def rate_limit_exceeded(e):
 if __name__ == '__main__':
     # Check environment
     environment = os.getenv('FLASK_ENV', 'development')
+    logger.info(f"Starting app in {environment} mode")
     
     if environment == 'production':
         # Production settings
@@ -781,7 +786,8 @@ if __name__ == '__main__':
             app,
             host='0.0.0.0',
             port=int(os.getenv('PORT', 5000)),
-            debug=False
+            debug=False,
+            allow_unsafe_werkzeug=True
         )
     else:
         # Development settings
@@ -790,5 +796,6 @@ if __name__ == '__main__':
             host='0.0.0.0',
             port=5000,
             debug=True,
-            use_reloader=False  # Set to False to avoid double initialization
+            use_reloader=False,  # Set to False to avoid double initialization
+            allow_unsafe_werkzeug=True
         )

@@ -7,7 +7,7 @@ import FuturisticDashboard from './components/FuturisticDashboard';
 import axios from 'axios';
 import './App.css';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 
 function App() {

@@ -25,7 +25,7 @@ ChartJS.register(
   Legend
 );
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 const FutureSelfInterface = ({ 
   sessionId, 
@@ -151,7 +151,7 @@ const FutureSelfInterface = ({
         });
         
         if (ageResponse.data.success) {
-          setFutureAvatar(`http://localhost:5000${ageResponse.data.aged_photo_url}`);
+          setFutureAvatar(`https://ideal-youth-production.up.railway.app${ageResponse.data.aged_photo_url}`);
         }
       }
       

@@ -135,6 +135,16 @@ class SessionService:
             session_data["exported_at"] = datetime.now().isoformat()
             return session_data
         return None
+    
+    def is_healthy(self) -> bool:
+        """Check if the session service is healthy"""
+        try:
+            # Simple health check - just verify the service is responsive
+            self.get_session_stats()
+            return True
+        except Exception as e:
+            logger.error(f"Session service health check failed: {e}")
+            return False
 
 # Global session service instance
 session_service = SessionService()

@@ -4,7 +4,7 @@ import { Card, CardHeader, CardBody, Button, Badge, StatusBadge } from './ui';
 import ChatBox from './ui/ChatBox';
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
+const API_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const [messages, setMessages] = useState([]);
@@ -21,7 +21,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const initializeSocket = useCallback(() => {
     try {
       import('socket.io-client').then(({ io }) => {
-        socketRef.current = io('http://localhost:5000', {
+        socketRef.current = io('https://ideal-youth-production.up.railway.app', {
           transports: ['websocket', 'polling'],
           reconnection: true,
           reconnectionAttempts: 5,
