@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Doughnut, Line } from 'react-chartjs-2';
 import {
@@ -52,8 +52,29 @@ const FutureSelfInterface = ({
   const [chatMode, setChatMode] = useState('normal'); // normal, professional, casual
   const [aiPersonality, setAiPersonality] = useState('encouraging');
   const [messageCount, setMessageCount] = useState(0);
-  const [lastActivity, setLastActivity] = useState(new Date());
   const [showPerformanceDashboard, setShowPerformanceDashboard] = useState(false);
+
+  const addMessage = useCallback((message, sender) => {
+    console.log(`Adding message: ${sender} - ${message}`);
+    const newMessage = { 
+      message, 
+      sender, 
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      chatMode,
+      aiPersonality
+    };
+    
+    setMessages(prev => {
+      const newMessages = [...prev, newMessage];
+      console.log('Updated messages:', newMessages);
+      return newMessages;
+    });
+    
+    // Update message history
+    setMessageHistory(prev => [...prev, newMessage]);
+    setMessageCount(prev => prev + 1);
+  }, [chatMode, aiPersonality]);
 
   useEffect(() => {
     generateFutureSelf();
@@ -138,7 +159,7 @@ const FutureSelfInterface = ({
     } else {
       console.log('No socket available in FutureSelfInterface');
     }
-  }, [socket]);
+  }, [socket, addMessage]);
 
   const generateFutureSelf = async () => {
     try {
@@ -177,29 +198,6 @@ const FutureSelfInterface = ({
       addMessage(`Hello! I'm you from 10 years in the future as a ${selectedCareer.replace('_', ' ')}. Ask me anything!`, 'future-self');
       setIsLoading(false);
     }
-  };
-
-  const addMessage = (message, sender) => {
-    console.log(`Adding message: ${sender} - ${message}`);
-    const newMessage = { 
-      message, 
-      sender, 
-      id: Date.now(),
-      timestamp: new Date().toISOString(),
-      chatMode,
-      aiPersonality
-    };
-    
-    setMessages(prev => {
-      const newMessages = [...prev, newMessage];
-      console.log('Updated messages:', newMessages);
-      return newMessages;
-    });
-    
-    // Update message history
-    setMessageHistory(prev => [...prev, newMessage]);
-    setMessageCount(prev => prev + 1);
-    setLastActivity(new Date());
   };
 
   const sendMessage = () => {

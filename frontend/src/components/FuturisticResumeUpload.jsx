@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardHeader, CardBody, CardTitle, CardDescription, Button, Badge, SkillBadge, ProgressBar } from './ui';
 import axios from 'axios';

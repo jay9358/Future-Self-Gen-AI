@@ -1,13 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Navbar, Card, CardHeader, CardBody, CardTitle, CardDescription, Button } from './components/ui';
+import { Navbar, Card, CardBody, CardTitle, CardDescription, Button } from './components/ui';
 import FuturisticResumeUpload from './components/FuturisticResumeUpload';
 import FuturisticChat from './components/FuturisticChat';
 import FuturisticDashboard from './components/FuturisticDashboard';
-import axios from 'axios';
 import './App.css';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 
 function App() {
@@ -15,7 +12,6 @@ function App() {
   const [sessionId, setSessionId] = useState(null);
   const [resumeAnalysis, setResumeAnalysis] = useState(null);
   const [persona, setPersona] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
   // Debug logging
