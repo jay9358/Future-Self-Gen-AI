@@ -2,7 +2,7 @@
 // Change this to point to your local server or production server
 
 // For local development
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 // For production (uncomment the line below and comment the line above)
 // const API_BASE_URL = 'https://ideal-youth-production.up.railway.app/api';

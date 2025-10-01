@@ -27,8 +27,8 @@ sys.path.append(current_dir)
 # Import services
 from services.session_service import SessionService
 from services.personalized_ai import personalized_ai_service
-from services.rag_pipeline import rag_pipeline
-from services.basic_rag import basic_rag
+# RAG pipeline removed - using resume-aware AI instead
+# RAG removed - using resume-aware AI instead
 from model.career_database import career_database
 from services.resume_analyzer import (
     ResumeAnalyzer, 
@@ -223,27 +223,13 @@ def handle_message(data):
     emit('typing', {'status': 'start'}, room=session_id)
     
     try:
-        # Generate AI response with RAG context
+        # Generate AI response with enhanced resume awareness
         logger.info(f"Generating AI response for session {session_id}")
         
-        # Get relevant context from RAG if available
-        rag_context = ""
-        if basic_rag.get_document_count() > 0:
-            try:
-                rag_context = basic_rag.retrieve_context(message, top_k=2)
-                logger.info(f"Retrieved RAG context: {len(rag_context)} characters")
-            except Exception as e:
-                logger.warning(f"Failed to retrieve RAG context: {e}")
-                rag_context = ""
-        
-        # Add RAG context to persona for enhanced responses
-        enhanced_persona = persona.copy()
-        if rag_context and rag_context != "No relevant documents found.":
-            enhanced_persona['rag_context'] = rag_context
-        
+        # Use persona directly without RAG context
         ai_response = personalized_ai_service.generate_response(
             message=message,
-            persona=enhanced_persona,
+            persona=persona,
             session_id=session_id,
             conversation_history=conversation_history
         )
@@ -315,7 +301,7 @@ def health_check():
     services_status = {
         'api': 'healthy',
         'personalized_ai': personalized_ai_service.is_model_available(),
-        'basic_rag': basic_rag.get_stats(),
+        'resume_aware_ai': 'active',
         'gemini': bool(os.getenv('GEMINI_API_KEY')),
         'sessions': session_service.is_healthy(),
         'websocket': len(active_connections),
@@ -571,27 +557,13 @@ def chat():
             logger.info(f"Using frontend conversation history with {len(frontend_conversation_history)} messages")
             conversation_history = frontend_conversation_history
         
-        # Generate response using enhanced AI with RAG context
+        # Generate response using enhanced AI with resume awareness
         logger.info(f"Generating AI response for session {session_id}")
         
-        # Get relevant context from RAG if available
-        rag_context = ""
-        if basic_rag.get_document_count() > 0:
-            try:
-                rag_context = basic_rag.retrieve_context(message, top_k=2)
-                logger.info(f"Retrieved RAG context: {len(rag_context)} characters")
-            except Exception as e:
-                logger.warning(f"Failed to retrieve RAG context: {e}")
-                rag_context = ""
-        
-        # Add RAG context to persona for enhanced responses
-        enhanced_persona = persona.copy()
-        if rag_context and rag_context != "No relevant documents found.":
-            enhanced_persona['rag_context'] = rag_context
-        
+        # Use persona directly without RAG context
         ai_response = personalized_ai_service.generate_response(
             message=message,
-            persona=enhanced_persona,
+            persona=persona,
             session_id=session_id,
             conversation_history=conversation_history
         )
@@ -705,12 +677,8 @@ def get_learning_resources():
         missing_skills = data.get('missing_skills', [])
         career_goal = data.get('career_goal', 'software_engineer')
         
-        # Use RAG pipeline if available
-        if rag_pipeline and rag_pipeline.is_available():
-            resources = rag_pipeline.get_learning_resources(missing_skills, career_goal)
-        else:
-            # Fallback to basic recommendations
-            resources = {
+        # Generate learning resources based on career path
+        resources = {
                 'courses': [
                     {
                         'title': f"Learn {skill}",

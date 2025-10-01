@@ -345,21 +345,34 @@ class PersonalizedAIService:
         emotion = context.get('emotional_state', 'neutral')
         depth = context.get('depth', 0)
         
-        # Get RAG context if available
-        rag_context = persona.get('rag_context', '')
+        # Get resume data for enhanced context
+        resume_data = persona.get('resume_data', {})
+        extracted_info = resume_data.get('extracted_info', {})
+        skills = extracted_info.get('skills', [])
+        years_experience = extracted_info.get('years_experience', 0)
+        education_level = extracted_info.get('education_level', 0)
+        personal_info = extracted_info.get('personal_info', {})
         
-        # Build conversation context
+        # Build conversation context with more history and key topics
         conversation_context = ""
         if conversation_history and len(conversation_history) > 0:
-            recent_messages = conversation_history[-4:]  # Last 4 messages for context
+            recent_messages = conversation_history[-6:]  # Last 6 messages for better context
             conversation_context = "\n\nRECENT CONVERSATION:\n"
             for msg in recent_messages:
                 role_label = "You (past)" if msg.get('role') == 'user' else "Me (future)"
                 conversation_context += f"{role_label}: {msg.get('content', '')}\n"
+            
+            # Add conversation summary for longer conversations
+            if len(conversation_history) > 10:
+                key_topics = self._extract_conversation_topics(conversation_history)
+                if key_topics:
+                    conversation_context += f"\nKEY TOPICS DISCUSSED: {', '.join(key_topics[:5])}\n"
         
         # Avoid repetition by checking what we've already discussed
         used_topics = []
         used_phrases = []
+        used_stories = []
+        
         if conversation_history:
             for msg in conversation_history[-8:]:  # Check last 8 messages
                 if msg.get('role') == 'assistant':
@@ -379,16 +392,31 @@ class PersonalizedAIService:
                         used_topics.append('interview')
                     if 'burnout' in content or 'burning out' in content:
                         used_topics.append('burnout')
+                    if 'first job' in content or 'first day' in content:
+                        used_stories.append('first_job_story')
+                    if 'failed' in content and 'learned' in content:
+                        used_stories.append('failure_learning_story')
         
-        # Add instruction to avoid repetitive phrases
+        # Add instruction to avoid repetitive phrases and stories
         repetition_instruction = ""
-        if used_phrases:
-            repetition_instruction = f"\n\nAVOID THESE REPETITIVE PHRASES: {', '.join(used_phrases)}"
+        if used_phrases or used_stories:
+            avoid_items = used_phrases + used_stories
+            repetition_instruction = f"\n\nAVOID THESE REPETITIVE ELEMENTS: {', '.join(avoid_items)}"
         
-        # Add RAG context if available
-        rag_context_section = ""
-        if rag_context and rag_context.strip():
-            rag_context_section = f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{rag_context}\n\nUse this context to provide more informed and helpful responses, but don't mention it directly."
+        # Add resume context for more personalized responses
+        resume_context_section = ""
+        if resume_data:
+            resume_context_section = f"\n\nYOUR RESUME CONTEXT:\n"
+            if skills:
+                resume_context_section += f"Current skills: {', '.join(skills[:8])}\n"
+            if years_experience > 0:
+                resume_context_section += f"Years of experience: {years_experience}\n"
+            if education_level > 0:
+                resume_context_section += f"Education level: {education_level}\n"
+            if personal_info.get('name'):
+                resume_context_section += f"Name: {personal_info.get('name')}\n"
+            
+            resume_context_section += "\nUse this resume information to provide more personalized and relevant advice. Reference their actual skills and experience when giving career guidance."
         
         prompt = f"""You are {name}, speaking from 10 years in the future (2035). You are now {age} years old and work as a {role}.
 
@@ -396,9 +424,9 @@ CRITICAL INSTRUCTIONS:
 - You ARE their future self who has lived through their exact struggles
 - Never break character or mention being an AI
 - Speak with deep emotional authenticity and vulnerability
-- Build on previous conversations naturally - don't repeat the same stories
+- Build on previous conversations naturally - reference specific things they've shared
 - Be conversational and human, not robotic
-- DON'T make up specific company names, locations, or detailed scenarios
+- Use their actual resume information to give relevant advice
 - Focus on emotional truths and general experiences, not fake specifics
 
 Your 10-year transformation:
@@ -408,17 +436,17 @@ Your 10-year transformation:
 
 Current conversation depth: {depth} messages
 Their emotional state: {emotion}
-Their current message: "{message}"{conversation_context}{repetition_instruction}{rag_context_section}
+Their current message: "{message}"{conversation_context}{repetition_instruction}{resume_context_section}
 
 RESPONSE GUIDELINES:
 - Be natural and conversational, like talking to a close friend
-- Reference the conversation history naturally
-- Share general experiences and emotions, not fake specific details
+- Reference specific things from the conversation history
+- Use their actual skills and experience from their resume when giving advice
 - Keep it under 80 words
 - End with a genuine question that shows you're listening
 - Use contractions and natural speech patterns
 - Be vulnerable and real, not preachy
-- DON'T mention specific companies, locations, or made-up scenarios
+- Connect their current situation to their resume background
 
 Your natural, heartfelt response:"""
         
@@ -626,6 +654,32 @@ Your natural, heartfelt response:"""
         message_clean = message.strip().lower()
         return any(message_clean == g or message_clean.startswith(g + ' ') for g in greetings)
     
+    def _extract_conversation_topics(self, conversation_history: List[Dict]) -> List[str]:
+        """Extract key topics from conversation history"""
+        topics = []
+        topic_keywords = {
+            'career': ['job', 'career', 'work', 'interview', 'resume', 'skills', 'experience'],
+            'education': ['school', 'college', 'university', 'degree', 'learning', 'study'],
+            'goals': ['goal', 'dream', 'want', 'hope', 'future', 'plan'],
+            'challenges': ['struggle', 'difficult', 'hard', 'problem', 'issue', 'challenge'],
+            'success': ['success', 'achievement', 'accomplish', 'win', 'succeed'],
+            'relationships': ['family', 'friend', 'relationship', 'love', 'partner'],
+            'health': ['health', 'fitness', 'mental', 'physical', 'wellness'],
+            'money': ['money', 'financial', 'salary', 'income', 'debt', 'rich']
+        }
+        
+        # Count topic mentions across all messages
+        topic_counts = {topic: 0 for topic in topic_keywords.keys()}
+        
+        for msg in conversation_history:
+            content = msg.get('content', '').lower()
+            for topic, keywords in topic_keywords.items():
+                if any(keyword in content for keyword in keywords):
+                    topic_counts[topic] += 1
+        
+        # Return topics mentioned more than once
+        return [topic for topic, count in topic_counts.items() if count > 1]
+    
     def _generate_crisis_response(self, persona: Dict[str, Any], context: Dict[str, Any]) -> str:
         """Generate crisis support response"""
         
@@ -745,7 +799,7 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
         }
     
     def create_future_self_persona(self, user_data: Dict[str, Any], career_goal: str) -> Dict[str, Any]:
-        """Create persona from user data"""
+        """Create persona from user data with enhanced resume awareness"""
         
         personal_info = user_data.get('personal_info', {})
         name = personal_info.get('name', 'Friend')
@@ -769,6 +823,18 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
         career_wisdom = self._get_career_wisdom(career_goal)
         career_challenges = self._get_career_challenges(career_goal, years_exp_int)
         
+        # Store resume data for context in conversations
+        resume_data = {
+            'extracted_info': user_data.get('extracted_info', {}),
+            'skills': user_data.get('skills', {}),
+            'career_match': user_data.get('career_match', {}),
+            'career_insights': user_data.get('career_insights', []),
+            'detected_career': user_data.get('detected_career', career_goal),
+            'years_experience': years_experience,
+            'education_level': user_data.get('education_level', 0),
+            'personal_info': personal_info
+        }
+        
         return {
             'name': name,
             'current_age': future_age,
@@ -778,7 +844,8 @@ I'm proof that staying alive is worth it. The pain is temporary, but the choice 
             'achievements': career_achievements,
             'challenges_overcome': career_challenges,
             'specific_memories': career_memories,
-            'wisdom_gained': career_wisdom
+            'wisdom_gained': career_wisdom,
+            'resume_data': resume_data  # Include resume data for context
         }
     
     def _get_career_achievements(self, career: str, years_experience: int) -> List[str]:
