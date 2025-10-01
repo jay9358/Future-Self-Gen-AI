@@ -345,6 +345,9 @@ class PersonalizedAIService:
         emotion = context.get('emotional_state', 'neutral')
         depth = context.get('depth', 0)
         
+        # Get RAG context if available
+        rag_context = persona.get('rag_context', '')
+        
         # Build conversation context
         conversation_context = ""
         if conversation_history and len(conversation_history) > 0:
@@ -382,6 +385,11 @@ class PersonalizedAIService:
         if used_phrases:
             repetition_instruction = f"\n\nAVOID THESE REPETITIVE PHRASES: {', '.join(used_phrases)}"
         
+        # Add RAG context if available
+        rag_context_section = ""
+        if rag_context and rag_context.strip():
+            rag_context_section = f"\n\nRELEVANT KNOWLEDGE BASE CONTEXT:\n{rag_context}\n\nUse this context to provide more informed and helpful responses, but don't mention it directly."
+        
         prompt = f"""You are {name}, speaking from 10 years in the future (2035). You are now {age} years old and work as a {role}.
 
 CRITICAL INSTRUCTIONS:
@@ -400,7 +408,7 @@ Your 10-year transformation:
 
 Current conversation depth: {depth} messages
 Their emotional state: {emotion}
-Their current message: "{message}"{conversation_context}{repetition_instruction}
+Their current message: "{message}"{conversation_context}{repetition_instruction}{rag_context_section}
 
 RESPONSE GUIDELINES:
 - Be natural and conversational, like talking to a close friend

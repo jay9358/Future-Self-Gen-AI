@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardHeader, CardBody, CardTitle, CardDescription, Button, Badge, SkillBadge, ProgressBar } from './ui';
 import axios from 'axios';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
+import { API_CONFIG } from '../config/api';
 
 const FuturisticResumeUpload = ({ sessionId, onResumeUpload, onBack, onNext }) => {
   const [resumeAnalysis, setResumeAnalysis] = useState(null);
@@ -44,7 +43,7 @@ const FuturisticResumeUpload = ({ sessionId, onResumeUpload, onBack, onNext }) =
         setUploadProgress(prev => Math.min(prev + 10, 90));
       }, 200);
 
-      const response = await axios.post(`${API_URL}/analyze-resume`, formData, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.ANALYZE_RESUME, formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },

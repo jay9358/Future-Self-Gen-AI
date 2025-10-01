@@ -13,6 +13,7 @@ import {
   Legend,
 } from 'chart.js';
 import PerformanceDashboard from './PerformanceDashboard';
+import { API_CONFIG } from '../config/api';
 
 ChartJS.register(
   CategoryScale,
@@ -24,8 +25,6 @@ ChartJS.register(
   Tooltip,
   Legend
 );
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
 
 const FutureSelfInterface = ({ 
   sessionId, 
@@ -165,19 +164,19 @@ const FutureSelfInterface = ({
     try {
       // Age the photo
       if (uploadedPhotoUrl) {
-        const ageResponse = await axios.post(`${API_URL}/age-photo`, {
+        const ageResponse = await axios.post(API_CONFIG.ENDPOINTS.AGE_PHOTO, {
           session_id: sessionId,
           career: selectedCareer,
           original_photo_url: uploadedPhotoUrl
         });
         
         if (ageResponse.data.success) {
-          setFutureAvatar(`https://ideal-youth-production.up.railway.app${ageResponse.data.aged_photo_url}`);
+          setFutureAvatar(`${API_CONFIG.SOCKET_URL}${ageResponse.data.aged_photo_url}`);
         }
       }
       
       // Start conversation
-      const convResponse = await axios.post(`${API_URL}/start-conversation`, {
+      const convResponse = await axios.post(API_CONFIG.ENDPOINTS.START_CONVERSATION, {
         session_id: sessionId,
         career: selectedCareer,
         name: 'Friend'
@@ -253,7 +252,8 @@ const FutureSelfInterface = ({
         conversation_id: conversationId,
         career: selectedCareer,
         chat_mode: chatMode,
-        ai_personality: aiPersonality
+        ai_personality: aiPersonality,
+        conversation_history: messages.slice(-10) // Send last 10 messages for context
          });
     } else {
       console.log('Socket not connected, using fallback response');
@@ -310,7 +310,7 @@ const FutureSelfInterface = ({
 
   const loadSkillsAnalysis = async () => {
     try {
-      const response = await axios.post(`${API_URL}/skills-analysis`, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.SKILLS_ANALYSIS, {
         session_id: sessionId,
         career: selectedCareer
       });
@@ -325,7 +325,7 @@ const FutureSelfInterface = ({
 
   const loadProjects = async () => {
     try {
-      const response = await axios.post(`${API_URL}/generate-projects`, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.GENERATE_PROJECTS, {
         career: selectedCareer,
         skill_level: 'intermediate'
       });
@@ -346,7 +346,7 @@ const FutureSelfInterface = ({
 
   const loadInterviewPrep = async () => {
     try {
-      const response = await axios.post(`${API_URL}/interview-prep`, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.INTERVIEW_PREP, {
         career: selectedCareer,
         experience_level: 'entry'
       });
@@ -361,7 +361,7 @@ const FutureSelfInterface = ({
 
   const loadSalaryProjection = async () => {
     try {
-      const response = await axios.post(`${API_URL}/salary-projection`, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.SALARY_PROJECTION, {
         career: selectedCareer,
         current_skills: resumeData?.extracted_info?.skills || [],
         years_experience: resumeData?.extracted_info?.years_experience || 0
@@ -377,7 +377,7 @@ const FutureSelfInterface = ({
 
   const loadTimeline = async () => {
     try {
-      const response = await axios.post(`${API_URL}/generate-timeline`, {
+      const response = await axios.post(API_CONFIG.ENDPOINTS.GENERATE_TIMELINE, {
         career: selectedCareer
       });
       

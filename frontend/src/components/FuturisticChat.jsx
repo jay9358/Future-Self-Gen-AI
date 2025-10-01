@@ -3,8 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardHeader, CardBody, Button, Badge, StatusBadge } from './ui';
 import ChatBox from './ui/ChatBox';
 import axios from 'axios';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
+import { API_CONFIG } from '../config/api';
 
 const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const [messages, setMessages] = useState([]);
@@ -21,7 +20,7 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
   const initializeSocket = useCallback(() => {
     try {
       import('socket.io-client').then(({ io }) => {
-        socketRef.current = io('https://ideal-youth-production.up.railway.app', {
+        socketRef.current = io(API_CONFIG.SOCKET_URL, {
           transports: ['websocket', 'polling'],
           reconnection: true,
           reconnectionAttempts: 5,
@@ -134,32 +133,42 @@ const FuturisticChat = ({ sessionId, persona, onBack, onNext }) => {
       timestamp: Date.now()
     };
     
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(prev => {
+      const updatedMessages = [...prev, userMessage];
+      
+      // Send message with conversation history
+      setTimeout(() => {
+        try {
+          if (socketRef.current && socketRef.current.connected) {
+            socketRef.current.emit('message', {
+              message: message,
+              session_id: sessionId,
+              career: persona?.career_path || 'software_engineer',
+              conversation_history: updatedMessages.slice(-10) // Send last 10 messages for context
+            });
+          } else {
+            sendViaHttp(message, updatedMessages);
+          }
+        } catch (error) {
+          console.error('Error sending message:', error);
+          handleSendError(error);
+        }
+      }, 0);
+      
+      return updatedMessages;
+    });
     setIsTyping(true);
     setError(null);
-
-    try {
-      if (socketRef.current && socketRef.current.connected) {
-        socketRef.current.emit('message', {
-          message: message,
-          session_id: sessionId,
-          career: persona?.career_path || 'software_engineer'
-        });
-      } else {
-        await sendViaHttp(message);
-      }
-    } catch (error) {
-      console.error('Error sending message:', error);
-      handleSendError(error);
-    }
   };
 
   // HTTP fallback
-  const sendViaHttp = async (message) => {
+  const sendViaHttp = async (message, conversationHistory = null) => {
     try {
-      const response = await axios.post(`${API_URL}/chat`, {
+      const historyToSend = conversationHistory || messages;
+      const response = await axios.post(API_CONFIG.ENDPOINTS.CHAT, {
         message: message,
-        session_id: sessionId
+        session_id: sessionId,
+        conversation_history: historyToSend.slice(-10) // Send last 10 messages for context
       }, {
         timeout: 15000,
         headers: {

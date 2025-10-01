@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
+import { API_CONFIG } from '../config/api';
 
 const PerformanceDashboard = ({ isVisible, onClose }) => {
   const [stats, setStats] = useState(null);
@@ -20,7 +19,7 @@ const PerformanceDashboard = ({ isVisible, onClose }) => {
   const fetchPerformanceStats = async () => {
     try {
       setLoading(true);
-      const response = await axios.get(`${API_URL}/performance`);
+      const response = await axios.get(API_CONFIG.ENDPOINTS.PERFORMANCE);
       setStats(response.data.performance);
       setLastUpdate(new Date());
     } catch (error) {
@@ -33,7 +32,7 @@ const PerformanceDashboard = ({ isVisible, onClose }) => {
   const optimizeSystem = async () => {
     try {
       setLoading(true);
-      await axios.post(`${API_URL}/optimize`);
+      await axios.post(API_CONFIG.ENDPOINTS.OPTIMIZE);
       await fetchPerformanceStats();
       alert('System optimized successfully!');
     } catch (error) {

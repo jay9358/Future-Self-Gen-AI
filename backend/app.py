@@ -28,6 +28,7 @@ sys.path.append(current_dir)
 from services.session_service import SessionService
 from services.personalized_ai import personalized_ai_service
 from services.rag_pipeline import rag_pipeline
+from services.basic_rag import basic_rag
 from model.career_database import career_database
 from services.resume_analyzer import (
     ResumeAnalyzer, 
@@ -188,6 +189,7 @@ def handle_message(data):
     client_id = request.sid
     session_id = data.get('session_id')
     message = data.get('message', '').strip()
+    frontend_conversation_history = data.get('conversation_history', [])
     
     logger.info(f"Message received from {client_id}: {message[:50]}...")
     
@@ -212,15 +214,36 @@ def handle_message(data):
     persona = session_data.get('persona', {})
     conversation_history = session_data.get('conversation_history', [])
     
+    # Use frontend conversation history if available and more recent
+    if frontend_conversation_history and len(frontend_conversation_history) > len(conversation_history):
+        logger.info(f"Using frontend conversation history with {len(frontend_conversation_history)} messages")
+        conversation_history = frontend_conversation_history
+    
     # Send typing indicator
     emit('typing', {'status': 'start'}, room=session_id)
     
     try:
-        # Generate AI response
+        # Generate AI response with RAG context
         logger.info(f"Generating AI response for session {session_id}")
+        
+        # Get relevant context from RAG if available
+        rag_context = ""
+        if basic_rag.get_document_count() > 0:
+            try:
+                rag_context = basic_rag.retrieve_context(message, top_k=2)
+                logger.info(f"Retrieved RAG context: {len(rag_context)} characters")
+            except Exception as e:
+                logger.warning(f"Failed to retrieve RAG context: {e}")
+                rag_context = ""
+        
+        # Add RAG context to persona for enhanced responses
+        enhanced_persona = persona.copy()
+        if rag_context and rag_context != "No relevant documents found.":
+            enhanced_persona['rag_context'] = rag_context
+        
         ai_response = personalized_ai_service.generate_response(
             message=message,
-            persona=persona,
+            persona=enhanced_persona,
             session_id=session_id,
             conversation_history=conversation_history
         )
@@ -292,6 +315,7 @@ def health_check():
     services_status = {
         'api': 'healthy',
         'personalized_ai': personalized_ai_service.is_model_available(),
+        'basic_rag': basic_rag.get_stats(),
         'gemini': bool(os.getenv('GEMINI_API_KEY')),
         'sessions': session_service.is_healthy(),
         'websocket': len(active_connections),
@@ -517,6 +541,7 @@ def chat():
         data = request.json
         session_id = data.get('session_id')
         message = data.get('message', '').strip()
+        frontend_conversation_history = data.get('conversation_history', [])
         
         if not session_id:
             return jsonify({'error': 'Session ID required'}), 400
@@ -541,12 +566,32 @@ def chat():
         persona = session_data.get('persona', {})
         conversation_history = session_data.get('conversation_history', [])
         
-        # Generate response using enhanced AI
+        # Use frontend conversation history if available and more recent
+        if frontend_conversation_history and len(frontend_conversation_history) > len(conversation_history):
+            logger.info(f"Using frontend conversation history with {len(frontend_conversation_history)} messages")
+            conversation_history = frontend_conversation_history
+        
+        # Generate response using enhanced AI with RAG context
         logger.info(f"Generating AI response for session {session_id}")
+        
+        # Get relevant context from RAG if available
+        rag_context = ""
+        if basic_rag.get_document_count() > 0:
+            try:
+                rag_context = basic_rag.retrieve_context(message, top_k=2)
+                logger.info(f"Retrieved RAG context: {len(rag_context)} characters")
+            except Exception as e:
+                logger.warning(f"Failed to retrieve RAG context: {e}")
+                rag_context = ""
+        
+        # Add RAG context to persona for enhanced responses
+        enhanced_persona = persona.copy()
+        if rag_context and rag_context != "No relevant documents found.":
+            enhanced_persona['rag_context'] = rag_context
         
         ai_response = personalized_ai_service.generate_response(
             message=message,
-            persona=persona,
+            persona=enhanced_persona,
             session_id=session_id,
             conversation_history=conversation_history
         )
@@ -754,6 +799,140 @@ def submit_feedback():
         })
     except Exception as e:
         logger.error(f"Feedback error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Basic RAG API endpoints
+@app.route('/api/rag/search', methods=['POST'])
+@limiter.limit("50 per hour")
+def rag_search():
+    """Search documents using basic RAG"""
+    try:
+        data = request.json
+        query = data.get('query', '').strip()
+        top_k = data.get('top_k', 5)
+        
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        # Search using basic RAG
+        results = basic_rag.search(query, top_k)
+        
+        return jsonify({
+            'success': True,
+            'query': query,
+            'results': results,
+            'total_found': len(results)
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG search error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rag/add-document', methods=['POST'])
+@limiter.limit("30 per hour")
+def rag_add_document():
+    """Add a document to the RAG knowledge base"""
+    try:
+        data = request.json
+        content = data.get('content', '').strip()
+        metadata = data.get('metadata', {})
+        
+        if not content:
+            return jsonify({'error': 'Document content is required'}), 400
+        
+        # Add document to RAG
+        basic_rag.add_document(content, metadata)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Document added successfully',
+            'total_documents': basic_rag.get_document_count()
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG add document error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rag/add-documents', methods=['POST'])
+@limiter.limit("20 per hour")
+def rag_add_documents():
+    """Add multiple documents to the RAG knowledge base"""
+    try:
+        data = request.json
+        documents = data.get('documents', [])
+        
+        if not documents or not isinstance(documents, list):
+            return jsonify({'error': 'Documents array is required'}), 400
+        
+        # Add documents to RAG
+        basic_rag.add_documents(documents)
+        
+        return jsonify({
+            'success': True,
+            'message': f'{len(documents)} documents added successfully',
+            'total_documents': basic_rag.get_document_count()
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG add documents error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rag/retrieve-context', methods=['POST'])
+@limiter.limit("50 per hour")
+def rag_retrieve_context():
+    """Retrieve relevant context for a query"""
+    try:
+        data = request.json
+        query = data.get('query', '').strip()
+        top_k = data.get('top_k', 3)
+        
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+        
+        # Retrieve context using basic RAG
+        context = basic_rag.retrieve_context(query, top_k)
+        
+        return jsonify({
+            'success': True,
+            'query': query,
+            'context': context,
+            'top_k': top_k
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG retrieve context error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rag/stats', methods=['GET'])
+def rag_stats():
+    """Get RAG system statistics"""
+    try:
+        stats = basic_rag.get_stats()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG stats error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rag/clear', methods=['POST'])
+@limiter.limit("5 per hour")
+def rag_clear():
+    """Clear all documents from RAG knowledge base"""
+    try:
+        basic_rag.clear_documents()
+        
+        return jsonify({
+            'success': True,
+            'message': 'All documents cleared successfully',
+            'total_documents': basic_rag.get_document_count()
+        })
+        
+    except Exception as e:
+        logger.error(f"RAG clear error: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.errorhandler(404)

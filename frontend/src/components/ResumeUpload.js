@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
+import { API_CONFIG } from '../config/api';
 
 const ResumeUpload = ({ sessionId, onResumeUpload, onBack, onNext }) => {
   const [resumeAnalysis, setResumeAnalysis] = useState(null);
@@ -17,7 +16,7 @@ const ResumeUpload = ({ sessionId, onResumeUpload, onBack, onNext }) => {
     
     setIsAnalyzing(true);
     try {
-      const response = await axios.post(`${API_URL}/analyze-resume`, formData);
+      const response = await axios.post(API_CONFIG.ENDPOINTS.ANALYZE_RESUME, formData);
       
       if (response.data.success) {
         setResumeAnalysis(response.data);

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-
-const API_URL = 'https://ideal-youth-production.up.railway.app/api';
+import { API_CONFIG } from '../config/api';
 
 const PhotoUpload = ({ onPhotoUpload, onNext, onSkip }) => {
   const [uploadedImage, setUploadedImage] = useState(null);
@@ -34,7 +33,7 @@ const PhotoUpload = ({ onPhotoUpload, onNext, onSkip }) => {
     
     setIsUploading(true);
     try {
-      const response = await axios.post(`${API_URL}/upload`, formData);
+      const response = await axios.post(API_CONFIG.ENDPOINTS.UPLOAD_PHOTO, formData);
       
       if (response.data.success) {
         onPhotoUpload(response.data);
